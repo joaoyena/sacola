@@ -24,7 +24,7 @@ import {
   validateProductData,
   validateRechargeTransition,
   validateWithdrawalTransition,
-} from './src/lib/adminLogic';
+} from './src/lib/adminLogic.ts';
 
 interface AdminIdentity {
   uid: string;
