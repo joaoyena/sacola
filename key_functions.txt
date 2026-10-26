@@ -1,0 +1,1000 @@
+##############################################
+SCHEMA: private_mcpn | FN: buy_product_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.buy_product_mcpn(p_product_id uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_product_price NUMERIC;
+    v_product_income NUMERIC;
+    v_product_duration INTEGER;
+    v_product_limit INTEGER;
+    v_user_balance NUMERIC;
+    v_product_name TEXT;
+    v_active_count INTEGER;
+BEGIN
+    -- 1. Validar Sessão
+    IF v_user_id IS NULL THEN
+        RETURN json_build_object('success', false, 'message', 'Sessão expirada. Faça login novamente.');
+    END IF;
+
+    -- 2. Obter Dados do Produto (Verificar ATIVO)
+    SELECT nome, preco, renda_diaria, duracao_dias, COALESCE(limite_compra, 99)
+    INTO v_product_name, v_product_price, v_product_income, v_product_duration, v_product_limit
+    FROM public.produtos 
+    WHERE id = p_product_id AND ativo = true;
+
+    IF v_product_name IS NULL OR v_product_price IS NULL THEN
+        RETURN json_build_object('success', false, 'message', 'Este bot/produto não está disponível para ativação no momento.');
+    END IF;
+
+    -- 3. Validar Limite de Ativação por Usuário
+    SELECT COUNT(*) INTO v_active_count
+    FROM public.sys_600
+    WHERE user_id = v_user_id 
+      AND produto_id = p_product_id 
+      AND ativo = true;
+
+    IF v_active_count >= v_product_limit THEN
+        RETURN json_build_object('success', false, 'message', 'Limite máximo de ativações atingido (' || v_product_limit || ' unidade(s)).');
+    END IF;
+
+    -- 4. Verificar Saldo com Bloqueio Atômico de Linha (FOR UPDATE)
+    SELECT saldo_disponivel INTO v_user_balance 
+    FROM public.nucleo 
+    WHERE id = v_user_id 
+    FOR UPDATE;
+
+    IF v_user_balance IS NULL OR v_user_balance < v_product_price THEN
+        RETURN json_build_object('success', false, 'message', 'Saldo insuficiente para adquirir este produto.');
+    END IF;
+
+    -- 5. Deduzir Saldo
+    UPDATE public.nucleo 
+    SET saldo_disponivel = saldo_disponivel - v_product_price,
+        updated_at = now()
+    WHERE id = v_user_id;
+
+    -- 6. Inserir em sys_600
+    INSERT INTO public.sys_600 (
+        user_id, 
+        produto_id, 
+        preco_pago, 
+        renda_diaria, 
+        data_inicio, 
+        data_fim, 
+        ativo, 
+        created_at, 
+        dias_restantes
+    ) VALUES (
+        v_user_id, 
+        p_product_id, 
+        v_product_price, 
+        v_product_income, 
+        now(), 
+        now() + (v_product_duration || ' days')::interval, 
+        true, 
+        now(), 
+        v_product_duration
+    );
+
+    -- 7. Distribuir Comissões de Rede
+    BEGIN
+        PERFORM private_mcpn.distribute_purchase_commission(v_user_id, v_product_price);
+    EXCEPTION
+        WHEN OTHERS THEN
+            NULL;
+    END;
+
+    RETURN json_build_object('success', true, 'message', 'Bot ' || v_product_name || ' ativado com sucesso!');
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: buy_product_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.buy_product_mcpn(p_product_id uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN RETURN private_mcpn.buy_product_mcpn(p_product_id); END; $function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: confirm_recharge_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.confirm_recharge_mcpn(p_recharge_id uuid, p_bank_name text, p_image_path text)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn', 'extensions', 'pg_temp'
+AS $function$ DECLARE v_user_id UUID := auth.uid(); BEGIN IF v_user_id IS NULL THEN RETURN json_build_object('success', false, 'message', 'Sessao expirada.'); END IF; UPDATE public.paymentbot SET detalhes_transacao = COALESCE(detalhes_transacao, '{}'::jsonb) || jsonb_build_object('banco_origem', p_bank_name, 'comprovativo_url', p_image_path), status = 'recarregando' WHERE id = p_recharge_id AND user_id = v_user_id; IF NOT FOUND THEN RETURN json_build_object('success', false, 'message', 'Recarga nao encontrada.'); END IF; RETURN json_build_object('success', true, 'message', 'Enviado.'); END; $function$
+
+
+##############################################
+SCHEMA: public | FN: confirm_recharge_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.confirm_recharge_mcpn(p_recharge_id uuid, p_bank_name text, p_image_path text)
+ RETURNS json
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN RETURN private_mcpn.confirm_recharge_mcpn(p_recharge_id, p_bank_name, p_image_path); END; $function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: redeem_coupon_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.redeem_coupon_mcpn(p_code text DEFAULT NULL::text, p_action text DEFAULT 'redeem'::text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn', 'pg_temp'
+AS $function$ BEGIN RETURN private_mcpn.pestgay(p_code, p_action); END; $function$
+
+
+##############################################
+SCHEMA: public | FN: redeem_coupon_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.redeem_coupon_mcpn(p_code text DEFAULT NULL::text, p_action text DEFAULT 'redeem'::text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn', 'pg_temp'
+AS $function$ BEGIN RETURN private_mcpn.pestgay(p_code, p_action); END; $function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: request_recharge_kz_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.request_recharge_kz_mcpn(p_amount numeric, p_bank_id uuid DEFAULT NULL::uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn', 'extensions', 'pg_temp'
+AS $function$ DECLARE v_user_id UUID := auth.uid(); v_transaction_key TEXT; v_ultima_recarga TIMESTAMPTZ; v_bank_name TEXT; v_new_id UUID; BEGIN IF v_user_id IS NULL THEN RETURN json_build_object('success', false, 'message', 'Sessao expirada. Autentique-se novamente.'); END IF; SELECT created_at INTO v_ultima_recarga FROM public.paymentbot WHERE user_id = v_user_id AND status = 'recarregando' ORDER BY created_at DESC LIMIT 1; IF v_ultima_recarga IS NOT NULL AND (now() - v_ultima_recarga) < interval '5 minutes' THEN RETURN json_build_object('success', false, 'message', 'Voce ja possui uma solicitacao pendente recente. Aguarde 5 minutos.'); END IF; IF p_amount IS NULL OR p_amount < 3000 THEN RETURN json_build_object('success', false, 'message', 'O valor minimo de recarga e 3.000 Kz.'); END IF; IF p_amount > 5000000 THEN RETURN json_build_object('success', false, 'message', 'O valor maximo de recarga e 5.000.000 Kz.'); END IF; IF p_bank_id IS NOT NULL THEN SELECT nome_banco INTO v_bank_name FROM public.get_collection_bank_details_mcpn(p_bank_id); END IF; IF v_bank_name IS NULL THEN SELECT nome_banco INTO v_bank_name FROM public.get_collection_banks_mcpn() LIMIT 1; END IF; IF v_bank_name IS NULL THEN v_bank_name := 'Banco BAI'; END IF; v_transaction_key := upper(substring(md5(random()::text || clock_timestamp()::text) from 1 for 10)); INSERT INTO public.paymentbot (user_id, valor, status, detalhes_transacao, created_at) VALUES (v_user_id, p_amount, 'recarregando', jsonb_build_object('banco_destino', v_bank_name, 'chave_transacao', v_transaction_key), now()) RETURNING id INTO v_new_id; RETURN json_build_object('success', true, 'message', 'Solicitacao iniciada com sucesso.', 'recharge_id', v_new_id, 'transaction_key', v_transaction_key); END; $function$
+
+
+##############################################
+SCHEMA: public | FN: request_recharge_kz_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.request_recharge_kz_mcpn(p_amount numeric, p_bank_id uuid DEFAULT NULL::uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN RETURN private_mcpn.request_recharge_kz_mcpn(p_amount, p_bank_id); END; $function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: process_withdrawal_request
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.process_withdrawal_request(p_amount numeric, p_bank_id uuid DEFAULT NULL::uuid, p_password text DEFAULT NULL::text)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_balance NUMERIC;
+    v_bank_name TEXT; 
+    v_iban TEXT; 
+    v_nome_beneficiario TEXT;
+    v_user_phone TEXT;
+BEGIN
+    IF v_user_id IS NULL THEN 
+        RETURN json_build_object('success', false, 'message', 'Sessão expirada.'); 
+    END IF;
+    
+    -- Limite de 1 retirada por dia
+    IF EXISTS (
+        SELECT 1 FROM public.retiradas_mcpn 
+        WHERE user_id = v_user_id 
+        AND DATE(created_at AT TIME ZONE 'Africa/Luanda') = DATE(now() AT TIME ZONE 'Africa/Luanda')
+    ) THEN
+        RETURN json_build_object('success', false, 'message', 'Limite diário (1) retirada atingido.');
+    END IF;
+
+    -- Não permitir nova retirada se houver pendente
+    IF EXISTS (
+        SELECT 1 FROM public.retiradas_mcpn 
+        WHERE user_id = v_user_id 
+        AND status = 'pendente'
+    ) THEN
+        RETURN json_build_object('success', false, 'message', 'Você já possui uma retirada pendente. Aguarde a aprovação.');
+    END IF;
+
+    -- Saldo suficiente
+    SELECT saldo_disponivel, telefone INTO v_balance, v_user_phone FROM public.nucleo WHERE id = v_user_id;
+    IF v_balance IS NULL OR v_balance < p_amount THEN 
+        RETURN json_build_object('success', false, 'message', 'Saldo insuficiente.'); 
+    END IF;
+
+    -- Dados bancários de sys_t111
+    SELECT 
+        (dados_bancarios->>'nome_banco')::text, 
+        COALESCE(private_mcpn.decrypt_data_mcpn(dados_bancarios->>'iban'), 'Erro IBAN'),
+        COALESCE(private_mcpn.decrypt_data_mcpn(dados_bancarios->>'nome_completo'), 'Erro Titular')
+    INTO v_bank_name, v_iban, v_nome_beneficiario
+    FROM public.sys_t111 
+    WHERE user_id = v_user_id 
+    LIMIT 1;
+
+    IF v_bank_name IS NULL THEN
+        RETURN json_build_object('success', false, 'message', 'Nenhuma conta bancária vinculada. Vincule uma conta antes de sacar.');
+    END IF;
+
+    -- Deduz do saldo
+    UPDATE public.nucleo 
+    SET saldo_disponivel = saldo_disponivel - p_amount, 
+        total_retirado = total_retirado + p_amount, 
+        updated_at = now() 
+    WHERE id = v_user_id;
+
+    -- Insere retirada
+    INSERT INTO public.retiradas_mcpn (
+        user_id, 
+        valor_bruto, 
+        dados_bancarios_snapshot,
+        status, 
+        created_at
+    ) VALUES (
+        v_user_id, 
+        p_amount, 
+        jsonb_build_object(
+            'banco', v_bank_name,
+            'iban', v_iban,
+            'nome_beneficiario', COALESCE(v_nome_beneficiario, 'Indefinido'),
+            'nome_usuario', COALESCE(v_user_phone, 'Utilizador')
+        ),
+        'pendente', 
+        now()
+    );
+
+    RETURN json_build_object('success', true, 'message', 'Solicitação de retirada enviada com sucesso!');
+END;
+$function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: process_withdrawal_request
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.process_withdrawal_request(p_amount numeric)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+BEGIN
+    RETURN private_mcpn.process_withdrawal_request(p_amount, NULL, NULL);
+END; $function$
+
+
+##############################################
+SCHEMA: public | FN: process_withdrawal_request
+##############################################
+CREATE OR REPLACE FUNCTION public.process_withdrawal_request(p_amount numeric, p_bank_id uuid DEFAULT NULL::uuid, p_password text DEFAULT NULL::text)
+ RETURNS json
+ LANGUAGE plpgsql
+ SET search_path TO ''
+AS $function$
+BEGIN
+    RETURN private_mcpn.process_withdrawal_request(p_amount, p_bank_id, p_password);
+END; 
+$function$
+
+
+##############################################
+SCHEMA: public | FN: save_bank_data_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.save_bank_data_mcpn(p_bank_name text, p_holder_name text, p_iban text)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN
+  RETURN private_mcpn.link_bank_account_mcpn(p_bank_name, p_holder_name, p_iban);
+END;
+$function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: remove_bank_account_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.remove_bank_account_mcpn(p_id uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN
+    UPDATE public.nucleo
+    SET dados_bancarios = NULL
+    WHERE id = auth.uid();
+
+    IF FOUND THEN
+        RETURN json_build_object('success', true, 'message', 'Conta excluída com sucesso');
+    ELSE
+        RETURN json_build_object('success', false, 'message', 'Conta não encontrada');
+    END IF;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: remove_bank_account_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.remove_bank_account_mcpn(p_id uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN RETURN private_mcpn.remove_bank_account_mcpn(p_id); END; $function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_bank_accounts_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_bank_accounts_mcpn()
+ RETURNS TABLE(id uuid, bank_name text, owner_name text, iban text, created_at timestamp with time zone)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.id                                                                                   AS id,
+        (t.dados_bancarios->>'nome_banco')::text                                               AS bank_name,
+        COALESCE(private_mcpn.decrypt_data_mcpn(t.dados_bancarios->>'nome_completo'), 'Titular')::text AS owner_name,
+        COALESCE(private_mcpn.decrypt_data_mcpn(t.dados_bancarios->>'iban'), '')::text         AS iban,
+        t.updated_at
+    FROM public.nucleo t
+    WHERE t.id = v_user_id
+      AND t.dados_bancarios IS NOT NULL;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_available_products_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_available_products_mcpn()
+ RETURNS TABLE(id uuid, nome text, descricao text, preco numeric, renda_diaria numeric, duracao_dias integer, imagem_url text, limite_compra integer, size text)
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id, 
+        p.nome::text, 
+        ''::text AS descricao, 
+        p.preco, 
+        p.renda_diaria, 
+        p.duracao_dias, 
+        ''::text AS imagem_url, 
+        99::integer AS limite_compra,
+        'Cloud'::text AS size
+    FROM public.produtos p
+    WHERE p.ativo = true
+    ORDER BY p.preco ASC;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_purchased_products_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_purchased_products_mcpn()
+ RETURNS TABLE(id uuid, preco_pago numeric, renda_diaria numeric, data_inicio timestamp with time zone, data_fim timestamp with time zone, dias_restantes integer, ativo boolean, produto_nome text, produto_imagem text, url_download_setup text, storage_size text)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        up.id, 
+        up.preco_pago, 
+        up.renda_diaria,
+        up.data_inicio, 
+        up.data_fim, 
+        GREATEST(0, EXTRACT(DAY FROM (up.data_fim - now()))::integer) as dias_restantes,
+        CASE WHEN up.data_fim <= now() THEN false ELSE up.ativo END as ativo,
+        COALESCE(p.nome, 'Robô de Renda')::text as produto_nome,
+        ''::text as produto_imagem,
+        ''::text as url_download_setup,
+        'Cloud'::text as storage_size
+    FROM public.sys_600 up
+    LEFT JOIN public.produtos p ON up.produto_id = p.id
+    WHERE up.user_id = auth.uid()
+    ORDER BY up.data_inicio DESC;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_recharges_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_recharges_mcpn()
+ RETURNS TABLE(id uuid, valor numeric, banco_origem text, status text, created_at timestamp with time zone, chave_transacao text)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+BEGIN
+    IF v_user_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT 
+        r.id,
+        r.valor,
+        COALESCE(
+            r.detalhes_transacao->>'banco_origem',
+            r.detalhes_transacao->>'banco_destino',
+            r.detalhes_transacao->>'banco',
+            'Depósito Bancário'
+        )::text AS banco_origem,
+        r.status::text,
+        r.created_at,
+        COALESCE(r.detalhes_transacao->>'chave_transacao', '')::text AS chave_transacao
+    FROM public.paymentbot r
+    WHERE r.user_id = v_user_id
+    ORDER BY r.created_at DESC;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_recharges_summary_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_recharges_summary_mcpn()
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_total_aprovado NUMERIC := 0;
+    v_total_pendente NUMERIC := 0;
+    v_qtd_total INT := 0;
+    v_qtd_aprovadas INT := 0;
+    v_qtd_pendentes INT := 0;
+    v_recharges JSONB := '[]'::jsonb;
+BEGIN
+    IF v_user_id IS NULL THEN
+        RAISE EXCEPTION 'Acesso não autorizado: autenticação obrigatória.';
+    END IF;
+
+    SELECT 
+        COALESCE(SUM(CASE WHEN r.status IN ('aprovado', 'concluido', 'approved', 'completed') THEN r.valor ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN r.status IN ('pendente', 'pending', 'recarregando') THEN r.valor ELSE 0 END), 0),
+        COUNT(*),
+        COALESCE(COUNT(*) FILTER (WHERE r.status IN ('aprovado', 'concluido', 'approved', 'completed')), 0),
+        COALESCE(COUNT(*) FILTER (WHERE r.status IN ('pendente', 'pending', 'recarregando')), 0)
+    INTO 
+        v_total_aprovado,
+        v_total_pendente,
+        v_qtd_total,
+        v_qtd_aprovadas,
+        v_qtd_pendentes
+    FROM public.paymentbot r
+    WHERE r.user_id = v_user_id;
+
+    SELECT COALESCE(
+        jsonb_agg(
+            jsonb_build_object(
+                'id', r.id,
+                'valor', r.valor,
+                'amount', r.valor,
+                'status', r.status,
+                'created_at', r.created_at,
+                'banco_origem', COALESCE(
+                    r.detalhes_transacao->>'banco_origem',
+                    r.detalhes_transacao->>'banco_destino',
+                    r.detalhes_transacao->>'banco',
+                    'Depósito Bancário'
+                ),
+                'chave_transacao', COALESCE(r.detalhes_transacao->>'chave_transacao', ''),
+                'comprovativo_url', COALESCE(r.detalhes_transacao->>'comprovativo_url', ''),
+                'detalhes_transacao', r.detalhes_transacao
+            ) ORDER BY r.created_at DESC
+        ), '[]'::jsonb
+    )
+    INTO v_recharges
+    FROM public.paymentbot r
+    WHERE r.user_id = v_user_id;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'total_aprovado', v_total_aprovado,
+        'total_pendente', v_total_pendente,
+        'qtd_total', v_qtd_total,
+        'qtd_aprovadas', v_qtd_aprovadas,
+        'qtd_pendentes', v_qtd_pendentes,
+        'recharges', v_recharges
+    );
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_withdraw_info_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_withdraw_info_mcpn()
+ RETURNS TABLE(balance numeric, has_bank boolean, bank_name text, bank_id uuid, is_verified boolean, iban text, has_pending boolean, has_bots boolean, total_daily_income numeric)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn', 'extensions', 'pg_temp'
+AS $function$ DECLARE v_user_id UUID := auth.uid(); BEGIN RETURN QUERY SELECT COALESCE((SELECT a.saldo_disponivel::numeric FROM public.nucleo a WHERE a.id = v_user_id LIMIT 1), 0::numeric) AS balance, EXISTS(SELECT 1 FROM public.sys_t111 b WHERE b.user_id = v_user_id) AS has_bank, (SELECT (b.dados_bancarios->>'nome_banco')::text FROM public.sys_t111 b WHERE b.user_id = v_user_id LIMIT 1) AS bank_name, (SELECT b.user_id FROM public.sys_t111 b WHERE b.user_id = v_user_id LIMIT 1) AS bank_id, true AS is_verified, (SELECT private_mcpn.decrypt_data_mcpn(b.dados_bancarios->>'iban')::text FROM public.sys_t111 b WHERE b.user_id = v_user_id LIMIT 1) AS iban, EXISTS(SELECT 1 FROM public.retiradas_mcpn r WHERE r.user_id = v_user_id AND r.status = 'pendente') AS has_pending, EXISTS(SELECT 1 FROM public.sys_600 s WHERE s.user_id = v_user_id AND s.ativo = true AND (s.data_fim IS NULL OR s.data_fim > now())) AS has_bots, COALESCE((SELECT SUM(s.renda_diaria) FROM public.sys_600 s WHERE s.user_id = v_user_id AND s.ativo = true AND (s.data_fim IS NULL OR s.data_fim > now())), 0::numeric) AS total_daily_income; END; $function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_withdrawals_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_withdrawals_mcpn(p_limit integer DEFAULT 10, p_offset integer DEFAULT 0)
+ RETURNS TABLE(id uuid, banco_destino text, iban_snapshot text, valor_bruto numeric, valor_liquido numeric, status text, created_at timestamp with time zone)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+  v_user_id uuid := auth.uid();
+BEGIN
+  IF v_user_id IS NULL THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT 
+    w.id, 
+    COALESCE(w.dados_bancarios_snapshot->>'banco', 'Banco não informado')::text AS banco_destino,
+    COALESCE(w.dados_bancarios_snapshot->>'iban', 'Não informado')::text AS iban_snapshot,
+    w.valor_bruto, 
+    w.valor_liquido, 
+    w.status::text, 
+    w.created_at
+  FROM public.retiradas_mcpn w
+  WHERE w.user_id = v_user_id
+  ORDER BY w.created_at DESC
+  LIMIT p_limit
+  OFFSET p_offset;
+END; 
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_my_account_data
+##############################################
+CREATE OR REPLACE FUNCTION public.get_my_account_data()
+ RETURNS TABLE(saldo_disponivel numeric, total_recarregado numeric, total_retirado numeric, total_comissao_equipe numeric, lucro_acumulado numeric, tarefas_hoje integer, telefone text, nome_exibicao text, codigo_meu_refferal text)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn'
+AS $function$
+DECLARE
+  v_user_id UUID := auth.uid();
+BEGIN
+  RETURN QUERY
+  SELECT
+    a.saldo_disponivel::numeric,
+    a.total_recarregado::numeric,
+    a.total_retirado::numeric,
+    COALESCE((SELECT SUM(valor) FROM public.bonus_equipe_mcpn WHERE user_id = a.id), 0)::numeric,
+    COALESCE((SELECT SUM(valor) FROM public.renda_diaria_mcpn WHERE user_id = a.id), 0)::numeric,
+    COALESCE((SELECT COUNT(*)::integer FROM public.renda_diaria_mcpn WHERE user_id = a.id AND created_at::date = CURRENT_DATE), 0)::integer,
+    a.telefone::text,
+    a.nome_exibicao::text,
+    a.codigo_meu_refferal::text
+  FROM public.nucleo a
+  WHERE a.id = v_user_id;
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: getwallet
+##############################################
+CREATE OR REPLACE FUNCTION public.getwallet()
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn', 'pg_temp'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_user_balance NUMERIC := 0;
+    v_total_retirado NUMERIC := 0;
+    v_has_pending BOOLEAN := false;
+    v_has_bank BOOLEAN := false;
+    v_bank_name TEXT := NULL;
+    v_iban TEXT := NULL;
+    v_has_bots BOOLEAN := false;
+    v_now_luanda TIMESTAMP := (now() AT TIME ZONE 'Africa/Luanda');
+    v_day_of_week INT := EXTRACT(DOW FROM v_now_luanda);
+    v_hour INT := EXTRACT(HOUR FROM v_now_luanda);
+    v_is_banking_hours BOOLEAN := false;
+    v_payload JSONB;
+    v_encrypted_token TEXT;
+BEGIN
+    -- Validação estrita de autenticação
+    IF v_user_id IS NULL THEN
+        RAISE EXCEPTION 'Acesso não autorizado: autenticação obrigatória.';
+    END IF;
+
+    -- Horário bancário: Segunda a Sexta (1 a 5) das 09:00 às 18:00
+    IF v_day_of_week BETWEEN 1 AND 5 AND v_hour >= 9 AND v_hour < 18 THEN
+        v_is_banking_hours := true;
+    END IF;
+
+    -- Saldo e total retirado de nucleo
+    SELECT COALESCE(saldo_disponivel, 0), COALESCE(total_retirado, 0)
+    INTO v_user_balance, v_total_retirado
+    FROM public.nucleo
+    WHERE id = v_user_id;
+
+    -- Retirada pendente
+    SELECT EXISTS(
+        SELECT 1 FROM public.retiradas_mcpn
+        WHERE user_id = v_user_id AND status = 'pendente'
+    ) INTO v_has_pending;
+
+    -- Conta bancária vinculada em sys_t111
+    SELECT 
+        true,
+        (dados_bancarios->>'nome_banco')::text,
+        COALESCE(private_mcpn.decrypt_data_mcpn(dados_bancarios->>'iban'), 'IBAN Registrado')
+    INTO v_has_bank, v_bank_name, v_iban
+    FROM public.sys_t111
+    WHERE user_id = v_user_id
+    LIMIT 1;
+
+    -- Bots ativos
+    SELECT EXISTS(
+        SELECT 1 FROM public.sys_600
+        WHERE user_id = v_user_id AND ativo = true AND (data_fim IS NULL OR data_fim > now())
+    ) INTO v_has_bots;
+
+    -- Montagem do payload oficial com taxa 14% (fator líquido 0.86)
+    v_payload := jsonb_build_object(
+        'bot_type', 'wallet_assistant',
+        'currency', 'KZ',
+        'min_amount', 3000,
+        'max_amount', 500000,
+        'fee_percent', 14,
+        'net_factor', 0.86,
+        'formula', 'valor_liquido = valor_bruto * 0.86',
+        'schedule', 'Segunda a Sexta-feira, das 09:00 às 18:00 (dias úteis)',
+        'is_banking_hours_now', v_is_banking_hours,
+        'processing_time', 'De instantes a poucas horas em horário bancário (máx. 24h úteis)',
+        'user', jsonb_build_object(
+            'authenticated', true,
+            'balance', v_user_balance,
+            'total_withdrawn', v_total_retirado,
+            'has_pending', v_has_pending,
+            'has_bank', COALESCE(v_has_bank, false),
+            'bank_name', v_bank_name,
+            'has_bots', v_has_bots
+        ),
+        'timestamp', EXTRACT(EPOCH FROM now())
+    );
+
+    BEGIN
+        v_encrypted_token := private_mcpn.encrypt_data_mcpn(v_payload::text);
+    EXCEPTION WHEN OTHERS THEN
+        v_encrypted_token := encode(v_payload::text::bytea, 'base64');
+    END;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'min_amount', 3000,
+        'max_amount', 500000,
+        'fee_percent', 14,
+        'net_factor', 0.86,
+        'formula', 'valor_liquido = valor_bruto * 0.86',
+        'schedule', 'Segunda a Sexta-feira, das 09:00 às 18:00 (dias úteis)',
+        'is_banking_hours_now', v_is_banking_hours,
+        'processing_time', 'De instantes a poucas horas em horário bancário (máx. 24h úteis)',
+        'user_balance', v_user_balance,
+        'has_pending', v_has_pending,
+        'has_bank', COALESCE(v_has_bank, false),
+        'bank_name', v_bank_name,
+        'has_bots', v_has_bots,
+        'encrypted_token', v_encrypted_token
+    );
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: getpay
+##############################################
+CREATE OR REPLACE FUNCTION public.getpay()
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn', 'pg_temp'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_user_balance NUMERIC := 0;
+    v_total_recarregado NUMERIC := 0;
+    v_has_pending BOOLEAN := false;
+    v_banks JSONB := '[]'::jsonb;
+    v_payload JSONB;
+    v_encrypted_token TEXT;
+BEGIN
+    -- Validação estrita de autenticação
+    IF v_user_id IS NULL THEN
+        RAISE EXCEPTION 'Acesso não autorizado: autenticação obrigatória.';
+    END IF;
+
+    -- Obter saldo e total recarregado do usuário autenticado
+    SELECT COALESCE(saldo_disponivel, 0), COALESCE(total_recarregado, 0)
+    INTO v_user_balance, v_total_recarregado
+    FROM public.nucleo
+    WHERE id = v_user_id;
+
+    -- Verificar se o usuário possui recarga pendente
+    SELECT EXISTS(
+        SELECT 1 FROM public.paymentbot 
+        WHERE user_id = v_user_id AND status IN ('pendente', 'pending')
+    ) INTO v_has_pending;
+
+    -- Bancos de arrecadação da tabela pasta
+    SELECT contas INTO v_banks FROM public.pasta LIMIT 1;
+    IF v_banks IS NULL THEN
+        v_banks := '[]'::jsonb;
+    END IF;
+
+    -- Montagem do payload oficial
+    v_payload := jsonb_build_object(
+        'bot_type', 'payment_assistant',
+        'currency', 'KZ',
+        'min_amount', 3000,
+        'max_amount', 500000,
+        'fee_percent', 0,
+        'processing_time', '2 a 15 minutos',
+        'schedule', 'Disponível 24/7 para envio de comprovativos e recargas',
+        'banks', v_banks,
+        'user', jsonb_build_object(
+            'authenticated', true,
+            'balance', v_user_balance,
+            'total_recharged', v_total_recarregado,
+            'has_pending', v_has_pending
+        ),
+        'timestamp', EXTRACT(EPOCH FROM now())
+    );
+
+    BEGIN
+        v_encrypted_token := private_mcpn.encrypt_data_mcpn(v_payload::text);
+    EXCEPTION WHEN OTHERS THEN
+        v_encrypted_token := encode(v_payload::text::bytea, 'base64');
+    END;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'min_amount', 3000,
+        'max_amount', 500000,
+        'fee_percent', 0,
+        'currency', 'KZ',
+        'processing_time', '2 a 15 minutos',
+        'schedule', 'Disponível 24/7 para envio de comprovativos e recargas',
+        'banks', v_banks,
+        'user_balance', v_user_balance,
+        'has_pending', v_has_pending,
+        'encrypted_token', v_encrypted_token
+    );
+END;
+$function$
+
+
+##############################################
+SCHEMA: public | FN: get_invite_page_data_mcpn
+##############################################
+CREATE OR REPLACE FUNCTION public.get_invite_page_data_mcpn()
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_invite_code TEXT := '';
+    v_links JSONB := '{}'::jsonb;
+    v_app_link TEXT := 'https://www.telegramas.cc';
+BEGIN
+    IF v_user_id IS NOT NULL THEN
+        SELECT COALESCE(codigo_meu_refferal, '')
+        INTO v_invite_code
+        FROM public.nucleo
+        WHERE id = v_user_id;
+    END IF;
+
+    SELECT links
+    INTO v_links
+    FROM public.atendimento_links
+    ORDER BY updated_at DESC
+    LIMIT 1;
+
+    IF v_links IS NOT NULL THEN
+        v_app_link := COALESCE(v_links->>'app_atualizado', v_links->>'link_app_atualizado', 'https://www.telegramas.cc');
+    END IF;
+
+    IF v_app_link LIKE '%join-t.me%' THEN
+        v_app_link := 'https://www.telegramas.cc';
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'invite_code', v_invite_code,
+        'app_link', v_app_link,
+        'links', COALESCE(v_links, '{}'::jsonb)
+    );
+END;
+$function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: distribute_purchase_commission
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.distribute_purchase_commission(p_buyer_id uuid, p_amount numeric)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+DECLARE
+    v_l1_id UUID; v_l2_id UUID; v_l3_id UUID;
+    v_is_first_purchase BOOLEAN;
+BEGIN
+    IF p_amount < 10000 THEN RETURN; END IF;
+
+    SELECT (COUNT(*) = 1) INTO v_is_first_purchase
+    FROM public.sys_600
+    WHERE user_id = p_buyer_id;
+
+    IF v_is_first_purchase THEN
+        -- Nível 1 (10%)
+        SELECT patrocinador_id INTO v_l1_id FROM public.equipe_mcpn WHERE usuario_id = p_buyer_id;
+        IF v_l1_id IS NOT NULL THEN
+            UPDATE public.nucleo SET
+                saldo_disponivel = saldo_disponivel + (p_amount * 0.10)
+            WHERE id = v_l1_id;
+            INSERT INTO public.extrato_mcpn (user_id, tipo, from_user_id, valor, nivel, detalhes)
+            VALUES (v_l1_id, 'comissao_equipe', p_buyer_id, (p_amount * 0.10), 1,
+                jsonb_build_object('descricao', 'Comissão Compra Direta', 'porcentagem_aplicada', 10))
+            ON CONFLICT ON CONSTRAINT unique_comissao_evento DO NOTHING;
+
+            -- Nível 2 (6%)
+            SELECT patrocinador_id INTO v_l2_id FROM public.equipe_mcpn WHERE usuario_id = v_l1_id;
+            IF v_l2_id IS NOT NULL THEN
+                UPDATE public.nucleo SET
+                    saldo_disponivel = saldo_disponivel + (p_amount * 0.06)
+                WHERE id = v_l2_id;
+                INSERT INTO public.extrato_mcpn (user_id, tipo, from_user_id, valor, nivel, detalhes)
+                VALUES (v_l2_id, 'comissao_equipe', p_buyer_id, (p_amount * 0.06), 2,
+                    jsonb_build_object('descricao', 'Comissão Compra Indireta L2', 'porcentagem_aplicada', 6))
+                ON CONFLICT ON CONSTRAINT unique_comissao_evento DO NOTHING;
+
+                -- Nível 3 (2%)
+                SELECT patrocinador_id INTO v_l3_id FROM public.equipe_mcpn WHERE usuario_id = v_l2_id;
+                IF v_l3_id IS NOT NULL THEN
+                    UPDATE public.nucleo SET
+                        saldo_disponivel = saldo_disponivel + (p_amount * 0.02)
+                    WHERE id = v_l3_id;
+                    INSERT INTO public.extrato_mcpn (user_id, tipo, from_user_id, valor, nivel, detalhes)
+                    VALUES (v_l3_id, 'comissao_equipe', p_buyer_id, (p_amount * 0.02), 3,
+                        jsonb_build_object('descricao', 'Comissão Compra Indireta L3', 'porcentagem_aplicada', 2))
+                    ON CONFLICT ON CONSTRAINT unique_comissao_evento DO NOTHING;
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+END;
+$function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: collect_daily_earnings
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.collect_daily_earnings()
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions', 'private_mcpn'
+AS $function$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_total_collected NUMERIC := 0;
+    v_already_collected BOOLEAN;
+    v_today_luanda DATE := (now() AT TIME ZONE 'Africa/Luanda')::date;
+BEGIN
+    IF v_user_id IS NULL THEN
+        RETURN json_build_object('success', false, 'message', 'Sessão expirada.');
+    END IF;
+
+    -- Verificar se já coletou hoje (usar extrato_mcpn)
+    SELECT EXISTS (
+        SELECT 1 FROM public.extrato_mcpn
+        WHERE user_id = v_user_id
+          AND tipo = 'renda_diaria'
+          AND (created_at AT TIME ZONE 'Africa/Luanda')::date = v_today_luanda
+    ) INTO v_already_collected;
+
+    IF v_already_collected THEN
+        RETURN json_build_object('success', false, 'message', 'Você já coletou seus rendimentos hoje.');
+    END IF;
+
+    SELECT COALESCE(SUM(renda_diaria), 0) INTO v_total_collected
+    FROM public.sys_600
+    WHERE user_id = v_user_id AND ativo = true AND (dias_restantes > 0 OR dias_restantes IS NULL);
+
+    IF v_total_collected <= 0 THEN
+        RETURN json_build_object('success', false, 'message', 'Sem rendimentos ativos.');
+    END IF;
+
+    UPDATE public.sys_600 SET
+        dias_restantes = CASE WHEN dias_restantes IS NOT NULL THEN dias_restantes - 1 ELSE NULL END,
+        ativo = CASE WHEN dias_restantes IS NOT NULL AND (dias_restantes - 1) <= 0 THEN false ELSE true END
+    WHERE user_id = v_user_id AND ativo = true;
+
+    UPDATE public.nucleo SET
+        saldo_disponivel = saldo_disponivel + v_total_collected,
+        updated_at = now()
+    WHERE id = v_user_id;
+
+    -- Inserir no extrato unificado
+    INSERT INTO public.extrato_mcpn (user_id, tipo, valor)
+    VALUES (v_user_id, 'renda_diaria', v_total_collected);
+
+    RETURN json_build_object('success', true, 'total_collected', v_total_collected);
+END;
+$function$
+
+
+##############################################
+SCHEMA: private_mcpn | FN: credit_recharge_on_complete
+##############################################
+CREATE OR REPLACE FUNCTION private_mcpn.credit_recharge_on_complete()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'private_mcpn'
+AS $function$
+BEGIN
+    -- Verifica se o status foi alterado para 'completo' e se antes NÃO era 'completo'
+    -- Isso garante que o crédito aconteça apenas uma vez
+    IF NEW.status = 'completo' AND OLD.status IS DISTINCT FROM 'completo' THEN
+        
+        -- Atualizar saldo do usuário correspondente
+        UPDATE public.nucleo 
+        SET 
+            saldo_disponivel = saldo_disponivel + NEW.valor,
+            total_recarregado = COALESCE(total_recarregado, 0) + NEW.valor,
+            updated_at = now()
+        WHERE id = NEW.user_id;
+        
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+
+

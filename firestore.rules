@@ -1,0 +1,1124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Utilitários
+    function isAuth() {
+      return request.auth != null;
+    }
+    function isRegisteredAuth() {
+      return isAuth() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+    function productPath(productId) {
+      return /databases/$(database)/documents/produtos/$(productId);
+    }
+    function productPurchaseLimitPath(userId, productId) {
+      return /databases/$(database)/documents/sys_600_limits/$(userId + '_' + productId);
+    }
+    function isValidNonNegativeAmount(value) {
+      return value is number
+        || (value is string && value.matches('^[0-9]+([.][0-9]+)?$'));
+    }
+    function validProductForPurchase(purchase) {
+      let path = productPath(purchase.produto_id);
+      let product = get(path).data;
+      return exists(path)
+        && product.ativo == true
+        && product.nome == purchase.produto_nome
+        && isValidNonNegativeAmount(product.preco)
+        && purchase.preco_pago is number
+        && float(product.preco) > 0
+        && float(product.preco) == float(purchase.preco_pago)
+        && isValidNonNegativeAmount(product.renda_diaria)
+        && purchase.renda_diaria is number
+        && float(product.renda_diaria) >= 0
+        && float(product.renda_diaria) == float(purchase.renda_diaria)
+        && product.duracao_dias is int
+        && product.duracao_dias > 0
+        && product.duracao_dias == purchase.dias_restantes
+        && product.limite_compra is int
+        && product.limite_compra > 0;
+    }
+    function validPurchaseLimitTransition(userId, purchase) {
+      let counterPath = productPurchaseLimitPath(userId, purchase.produto_id);
+      let counter = getAfter(counterPath).data;
+      return existsAfter(counterPath)
+        && counter.user_id == userId
+        && counter.produto_id == purchase.produto_id
+        && counter.ultima_compra_id == purchase.id
+        && (
+          (!exists(counterPath) && counter.compras_realizadas == 1)
+          || (exists(counterPath)
+            && counter.compras_realizadas == get(counterPath).data.compras_realizadas + 1
+            && counter.compras_realizadas <= get(productPath(purchase.produto_id)).data.limite_compra)
+        );
+    }
+    function validPurchaseBalanceChange(userId, operation, oldBalance, newBalance) {
+      let botPath = /databases/$(database)/documents/sys_600/$(operation.get('document_id', ''));
+      let oldUser = get(userPath(userId)).data;
+      let newUser = getAfter(userPath(userId)).data;
+      let purchase = getAfter(botPath).data;
+      return operation.get('type', null) == 'purchase'
+        && operation.get('document_id', null) is string
+        && existsAfter(botPath)
+        && purchase.user_id == userId
+        && validProductForPurchase(purchase)
+        && validPurchaseLimitTransition(userId, purchase)
+        && newBalance >= 0
+        && newBalance == oldBalance - purchase.preco_pago
+        && newUser.get('total_retirado', 0) == oldUser.get('total_retirado', 0);
+    }
+    function validPurchaseLimitDocument(userId, docId, data) {
+      let purchasePath = /databases/$(database)/documents/sys_600/$(data.get('ultima_compra_id', ''));
+      let purchase = getAfter(purchasePath).data;
+      let productPathValue = productPath(data.get('produto_id', ''));
+      return data.keys().hasAll([
+          'user_id',
+          'produto_id',
+          'compras_realizadas',
+          'ultima_compra_id',
+          'created_at',
+          'updated_at'
+        ])
+        && data.keys().hasOnly([
+          'user_id',
+          'produto_id',
+          'compras_realizadas',
+          'ultima_compra_id',
+          'created_at',
+          'updated_at'
+        ])
+        && data.user_id == userId
+        && data.produto_id is string
+        && docId == userId + '_' + data.produto_id
+        && data.compras_realizadas is int
+        && data.compras_realizadas > 0
+        && data.ultima_compra_id is string
+        && data.created_at is string
+        && data.updated_at is string
+        && existsAfter(purchasePath)
+        && purchase.id == data.ultima_compra_id
+        && purchase.user_id == userId
+        && purchase.produto_id == data.produto_id
+        && validProductForPurchase(purchase)
+        && exists(productPathValue)
+        && data.compras_realizadas <= get(productPathValue).data.limite_compra;
+    }
+    function validDailyIncomeBotUpdate(userId, docId, data) {
+      let historyPath = /databases/$(database)/documents/extrato_mcpn/$(data.get('last_income_id', ''));
+      let changed = data.diff(resource.data).affectedKeys();
+      return resource.data.user_id == userId
+        && resource.data.id == docId
+        && resource.data.ativo == true
+        && resource.data.dias_restantes is int
+        && resource.data.dias_restantes > 0
+        && resource.data.renda_diaria is number
+        && resource.data.renda_diaria > 0
+        && changed.hasOnly(['ativo', 'dias_restantes', 'last_income_at', 'last_income_id'])
+        && data.dias_restantes == resource.data.dias_restantes - 1
+        && data.ativo == (data.dias_restantes > 0)
+        && data.last_income_at == request.time
+        && data.last_income_id is string
+        && existsAfter(historyPath)
+        && getAfter(historyPath).data.user_id == userId
+        && getAfter(historyPath).data.related_document_id == docId
+        && getAfter(historyPath).data.tipo == 'renda_diaria'
+        && getAfter(historyPath).data.valor == resource.data.renda_diaria
+        && getAfter(historyPath).data.created_at == request.time
+        && (!resource.data.keys().hasAny(['last_income_at'])
+          || request.time.date() != resource.data.last_income_at.date());
+    }
+    function validExhaustedBotDeactivation(userId, docId, data) {
+      return resource.data.user_id == userId
+        && resource.data.id == docId
+        && resource.data.ativo == true
+        && resource.data.dias_restantes is int
+        && resource.data.dias_restantes <= 0
+        && data.diff(resource.data).affectedKeys().hasOnly(['ativo'])
+        && data.ativo == false;
+    }
+    function validDailyIncomeBalanceChange(userId, operation, oldBalance, newBalance) {
+      let historyPath = /databases/$(database)/documents/extrato_mcpn/$(operation.get('document_id', ''));
+      let botPath = /databases/$(database)/documents/sys_600/$(operation.get('bot_id', ''));
+      let history = getAfter(historyPath).data;
+      let bot = getAfter(botPath).data;
+      let oldUser = get(userPath(userId)).data;
+      let newUser = getAfter(userPath(userId)).data;
+      return operation.get('type', null) == 'daily_income'
+        && operation.get('document_id', null) is string
+        && operation.get('bot_id', null) is string
+        && existsAfter(historyPath)
+        && existsAfter(botPath)
+        && history.user_id == userId
+        && history.tipo == 'renda_diaria'
+        && history.related_document_id == operation.bot_id
+        && history.valor is number
+        && bot.user_id == userId
+        && bot.last_income_id == operation.document_id
+        && bot.last_income_at == request.time
+        && history.valor == bot.renda_diaria
+        && history.created_at == request.time
+        && newBalance == oldBalance + history.valor
+        && newUser.get('total_retirado', 0) == oldUser.get('total_retirado', 0);
+    }
+    function validWithdrawalBalanceChange(userId, operation, oldBalance, newBalance) {
+      let withdrawalPath = /databases/$(database)/documents/retiradas/$(operation.get('document_id', ''));
+      let withdrawal = getAfter(withdrawalPath).data;
+      let oldUser = get(userPath(userId)).data;
+      let newUser = getAfter(userPath(userId)).data;
+      return operation.get('type', null) == 'withdrawal'
+        && operation.get('document_id', null) is string
+        && existsAfter(withdrawalPath)
+        && withdrawal.user_id == userId
+        && withdrawal.status == 'pendente'
+        && withdrawal.valor == withdrawal.valor_bruto
+        && newBalance == oldBalance - withdrawal.valor
+        && newUser.total_retirado == oldUser.get('total_retirado', 0) + withdrawal.valor;
+    }
+    function validWithdrawalBankSnapshot(userId, snapshot) {
+      let bankPath = /databases/$(database)/documents/bancarios/$(userId);
+      let legacyBankPath = /databases/$(database)/documents/sys_t111/$(userId);
+      let user = get(userPath(userId)).data;
+      return (exists(bankPath)
+          && get(bankPath).data.dados_bancarios.nome_banco == snapshot.banco
+          && get(bankPath).data.dados_bancarios.iban == snapshot.iban)
+        || (exists(legacyBankPath)
+          && get(legacyBankPath).data.dados_bancarios.nome_banco == snapshot.banco
+          && get(legacyBankPath).data.dados_bancarios.iban == snapshot.iban)
+        || (user.get('dados_bancarios', {}).get('nome_banco', null) == snapshot.banco
+          && user.get('dados_bancarios', {}).get('iban', null) == snapshot.iban);
+    }
+    function validCouponBalanceChange(userId, operation, oldBalance, newBalance) {
+      let couponPath = /databases/$(database)/documents/cupons/$(operation.get('coupon_id', ''));
+      let coupon = getAfter(couponPath).data;
+      let oldUser = get(userPath(userId)).data;
+      let newUser = getAfter(userPath(userId)).data;
+      return operation.get('type', null) == 'coupon'
+        && operation.get('coupon_id', null) is string
+        && existsAfter(couponPath)
+        && newUser.last_financial_operation.coupon_id == operation.coupon_id
+        && newBalance == oldBalance + coupon.valor
+        && coupon.resgates.size() == get(couponPath).data.get('resgates', []).size() + 1
+        && coupon.resgates[coupon.resgates.size() - 1].user_id == userId
+        && (
+          (get(couponPath).data.keys().hasAny(['resgatados_user_ids'])
+            && coupon.resgatados_user_ids.hasAll(
+              get(couponPath).data.get('resgatados_user_ids', [])
+            )
+            && coupon.resgatados_user_ids.size()
+              == get(couponPath).data.get('resgatados_user_ids', []).size() + 1)
+          || (!get(couponPath).data.keys().hasAny(['resgatados_user_ids'])
+            && coupon.resgatados_user_ids.size() == coupon.resgates.size())
+        )
+        && userId in coupon.resgatados_user_ids
+        && !(userId in get(couponPath).data.get('resgatados_user_ids', []))
+        && newUser.get('total_retirado', 0) == oldUser.get('total_retirado', 0);
+    }
+    function validLegacyProfileNormalization() {
+      return (resource.data.keys().hasAny(['saldo', 'saldo_disponivel', 'telefone']))
+        && !request.resource.data.keys().hasAny(['saldo', 'saldo_disponivel', 'telefone'])
+        && request.resource.data.get('balance', resource.data.get('balance',
+          resource.data.get('saldo', resource.data.get('saldo_disponivel', 0))))
+          == resource.data.get('balance', resource.data.get('saldo', resource.data.get('saldo_disponivel', 0)))
+        && request.resource.data.get('total_retirado', 0) == resource.data.get('total_retirado', 0);
+    }
+    function validFinancialUserUpdate(userId) {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let oldBalance = resource.data.get('balance', 0);
+      let newBalance = request.resource.data.get('balance', oldBalance);
+      let operation = request.resource.data.get('last_financial_operation', {});
+      return !changed.hasAny(['balance', 'total_retirado', 'last_financial_operation'])
+        || validLegacyProfileNormalization()
+        || (changed.hasAny(['balance'])
+          && (
+            validPurchaseBalanceChange(userId, operation, oldBalance, newBalance)
+            || validDailyIncomeBalanceChange(userId, operation, oldBalance, newBalance)
+            || validWithdrawalBalanceChange(userId, operation, oldBalance, newBalance)
+            || validCouponBalanceChange(userId, operation, oldBalance, newBalance)
+          ));
+    }
+    function hasValidSponsorEdge(sponsorId, memberId) {
+      let edgePath = /databases/$(database)/documents/equipe_mcpn/$(sponsorId + '_' + memberId);
+      return existsAfter(edgePath)
+        && getAfter(edgePath).data.patrocinador_id == sponsorId
+        && getAfter(edgePath).data.usuario_id == memberId;
+    }
+    function isAllowedPrivatePair(firstId, secondId) {
+      return firstId != secondId
+        && exists(userPath(firstId))
+        && exists(userPath(secondId));
+    }
+    function validConversationData(conversationId, data) {
+      return data.participants is list
+        && data.participants.size() == 2
+        && data.participants[0] is string
+        && data.participants[1] is string
+        && (conversationId == data.participants[0] + '_' + data.participants[1]
+          || conversationId == data.participants[1] + '_' + data.participants[0])
+        && isAllowedPrivatePair(data.participants[0], data.participants[1]);
+    }
+    function conversationIdAllowsMember(conversationId) {
+      let conversationPath = /databases/$(database)/documents/conversations/$(conversationId);
+      let parts = conversationId.split('_');
+      return (exists(conversationPath)
+          && validConversationData(conversationId, get(conversationPath).data)
+          && request.auth.uid in get(conversationPath).data.participants)
+        || (!exists(conversationPath)
+          && parts.size() == 2
+          && request.auth.uid in parts
+          && isAllowedPrivatePair(parts[0], parts[1]));
+    }
+    function canReadConversation(conversationId) {
+      let conversationPath = /databases/$(database)/documents/conversations/$(conversationId);
+      return isRegisteredAuth()
+        && exists(conversationPath)
+        && validConversationData(conversationId, get(conversationPath).data)
+        && request.auth.uid in get(conversationPath).data.participants;
+    }
+    function canReadChatFile(roomId) {
+      return isAuth() && (
+        roomId == 'public' ||
+        roomId == 'community' ||
+        canReadConversation(roomId)
+      );
+    }
+    function canReadFile(fileId) {
+      let filePath = /databases/$(database)/documents/chat_files/$(fileId);
+      return isAuth() && exists(filePath) && (
+        get(filePath).data.ownerId == request.auth.uid ||
+        canReadChatFile(get(filePath).data.roomId)
+      );
+    }
+
+    // ── Usuários (tabela principal e única unificada) ─────────────────────────
+    match /users/{userId} {
+      allow read: if isRegisteredAuth();
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasAll([
+          'id',
+          'phone',
+          'country_code',
+          'country_name',
+          'dial_code',
+          'referred_by',
+          'codigo_convite_ref',
+          'codigo_meu_refferal',
+          'nome_exibicao',
+          'balance',
+          'total_recarregado',
+          'total_retirado',
+          'device_id',
+          'created_at',
+          'updated_at'
+        ])
+        && request.resource.data.id == userId
+        && request.resource.data.phone is string
+        && request.resource.data.country_code is string
+        && request.resource.data.country_name is string
+        && request.resource.data.dial_code is string
+        && request.resource.data.referred_by is string
+        && request.resource.data.codigo_convite_ref is string
+        && request.resource.data.codigo_meu_refferal is string
+        && request.resource.data.nome_exibicao is string
+        && request.resource.data.device_id is string
+        && request.resource.data.created_at is string
+        && request.resource.data.updated_at is string
+        && request.resource.data.balance == 300
+        && request.resource.data.total_recarregado == 0
+        && request.resource.data.total_retirado == 0
+        && (!request.resource.data.keys().hasAny(['webpush_subscription'])
+          || (request.resource.data.webpush_subscription is map
+            && request.resource.data.webpush_subscription.size() == 0))
+        && !request.resource.data.keys().hasAny(['patrocinador_id', 'saldo', 'saldo_disponivel', 'telefone']);
+      allow update: if isOwner(userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'nome_exibicao',
+          'avatar_url',
+          'bio',
+          'updated_at',
+          'country_code',
+          'country_name',
+          'dial_code',
+          'device_id',
+          'last_login_at',
+          'referred_by',
+          'patrocinador_id',
+          'balance',
+          'total_retirado',
+          'last_financial_operation',
+          'phone',
+          'saldo',
+          'saldo_disponivel',
+          'telefone',
+          'dados_bancarios',
+          'webpush_subscription'
+        ])
+        && !request.resource.data.keys().hasAny(['saldo', 'saldo_disponivel', 'telefone'])
+        && validFinancialUserUpdate(userId)
+        && request.resource.data.get('codigo_convite_ref', null) == resource.data.get('codigo_convite_ref', null)
+        && (request.resource.data.get('patrocinador_id', null) == resource.data.get('patrocinador_id', null)
+          || (!resource.data.keys().hasAny(['patrocinador_id'])
+            && request.resource.data.patrocinador_id is string
+            && hasValidSponsorEdge(request.resource.data.patrocinador_id, userId)))
+        && (request.resource.data.get('referred_by', null) == resource.data.get('referred_by', null)
+          || (!resource.data.keys().hasAny(['patrocinador_id'])
+            && request.resource.data.referred_by == request.resource.data.patrocinador_id
+            && hasValidSponsorEdge(request.resource.data.patrocinador_id, userId)));
+      allow delete: if false;
+
+      match /device_sessions/{sessionId} {
+        allow read: if isRegisteredAuth() && isOwner(userId);
+        allow create: if isRegisteredAuth()
+          && isOwner(userId)
+          && request.resource.data.keys().hasOnly([
+            'session_nonce', 'device_id', 'active', 'ip_address',
+            'details', 'last_seen_at', 'updated_at'
+          ])
+          && request.resource.data.keys().hasAll([
+            'session_nonce', 'device_id', 'active', 'ip_address',
+            'details', 'last_seen_at', 'updated_at'
+          ])
+          && request.resource.data.session_nonce == sessionId
+          && request.resource.data.device_id is string
+          && request.resource.data.active is bool
+          && request.resource.data.ip_address is string
+          && request.resource.data.details is map
+          && request.resource.data.last_seen_at is string
+          && request.resource.data.updated_at is string;
+        allow update: if isRegisteredAuth()
+          && isOwner(userId)
+          && request.resource.data.session_nonce == resource.data.session_nonce
+          && request.resource.data.device_id == resource.data.device_id
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'active', 'ip_address', 'details', 'last_seen_at',
+            'updated_at', 'revoked_at'
+          ])
+          && request.resource.data.active is bool
+          && request.resource.data.last_seen_at is string
+          && request.resource.data.updated_at is string;
+        allow delete: if false;
+      }
+
+      match /device_session_history/{entryId} {
+        allow read: if isRegisteredAuth() && isOwner(userId);
+        allow create: if isRegisteredAuth()
+          && isOwner(userId)
+          && request.resource.data.keys().hasOnly([
+            'device_id', 'ip_address', 'action_type', 'success',
+            'details', 'created_at'
+          ])
+          && request.resource.data.keys().hasAll([
+            'device_id', 'ip_address', 'action_type', 'success',
+            'details', 'created_at'
+          ])
+          && request.resource.data.device_id is string
+          && request.resource.data.ip_address is string
+          && request.resource.data.action_type in ['session_active', 'session_terminated']
+          && request.resource.data.success is bool
+          && request.resource.data.details is map
+          && request.resource.data.created_at is string;
+        allow update, delete: if false;
+      }
+
+      match /private_chats/{contactId} {
+        allow read: if isRegisteredAuth()
+          && (isOwner(userId)
+            || (request.auth.uid == contactId
+              && isAllowedPrivatePair(userId, contactId)
+              && (resource == null || resource.data.contactId == contactId)));
+        allow create: if isRegisteredAuth()
+          && (isOwner(userId)
+            || (request.auth.uid == contactId && isAllowedPrivatePair(userId, contactId)))
+          && request.resource.data.contactId == contactId
+          && request.resource.data.lastSenderId == request.auth.uid;
+        allow update: if isRegisteredAuth()
+          && (isOwner(userId)
+            || (request.auth.uid == contactId
+              && isAllowedPrivatePair(userId, contactId)
+              && resource.data.contactId == contactId))
+          && request.resource.data.contactId == contactId
+          && resource.data.contactId == contactId
+          && ((request.resource.data.lastSenderId == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'lastMessage', 'lastMessageAt', 'lastSenderId', 'lastMessageType', 'unreadCount'
+              ]))
+            || (isOwner(userId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unreadCount'])));
+        allow delete: if isRegisteredAuth()
+          && (isOwner(userId)
+            || (request.auth.uid == contactId && isAllowedPrivatePair(userId, contactId)));
+      }
+
+      match /chat_read_state/{chatId} {
+        allow read: if isRegisteredAuth() && isOwner(userId);
+        allow create, update: if isRegisteredAuth()
+          && isOwner(userId)
+          && chatId == 'community'
+          && request.resource.data.keys().hasOnly(['lastReadAt'])
+          && request.resource.data.lastReadAt is string;
+        allow delete: if false;
+      }
+    }
+
+    // Playland: cada utilizador acede apenas ao próprio documento, sem contas anónimas.
+    match /playland/{userId} {
+      allow read, write: if isOwner(userId)
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    // ── Produtos (leitura pública) ────────────────────────────────────────────
+    match /produtos/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Bots comprados pelo usuário ───────────────────────────────────────────
+    match /sys_600/{docId} {
+      allow read: if isRegisteredAuth() && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create: if isRegisteredAuth()
+        && request.resource.data.keys().hasAll([
+          'id',
+          'user_id',
+          'produto_id',
+          'produto_nome',
+          'preco_pago',
+          'renda_diaria',
+          'data_inicio',
+          'data_fim',
+          'ativo',
+          'dias_restantes',
+          'created_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'user_id',
+          'produto_id',
+          'produto_nome',
+          'preco_pago',
+          'renda_diaria',
+          'data_inicio',
+          'data_fim',
+          'ativo',
+          'dias_restantes',
+          'created_at'
+        ])
+        && request.resource.data.id == docId
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.produto_id is string
+        && request.resource.data.produto_nome is string
+        && request.resource.data.preco_pago is number
+        && request.resource.data.renda_diaria is number
+        && request.resource.data.data_inicio is string
+        && request.resource.data.data_fim is string
+        && request.resource.data.ativo == true
+        && request.resource.data.dias_restantes is int
+        && request.resource.data.created_at is string
+        && validProductForPurchase(request.resource.data)
+        && validPurchaseLimitTransition(request.auth.uid, request.resource.data)
+        && existsAfter(userPath(request.auth.uid))
+        && getAfter(userPath(request.auth.uid)).data.balance
+          == get(userPath(request.auth.uid)).data.balance - request.resource.data.preco_pago
+        && getAfter(userPath(request.auth.uid)).data.balance >= 0
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.type == 'purchase'
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.document_id == docId;
+      allow update: if isRegisteredAuth()
+        && resource.data.user_id == request.auth.uid
+        && (
+          validDailyIncomeBotUpdate(request.auth.uid, docId, request.resource.data)
+          || validExhaustedBotDeactivation(request.auth.uid, docId, request.resource.data)
+        );
+      allow delete: if false;
+    }
+
+    // Contador atómico por utilizador/produto para aplicar limite_compra sem backend.
+    match /sys_600_limits/{docId} {
+      allow read: if isRegisteredAuth()
+        && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create: if isRegisteredAuth()
+        && validPurchaseLimitDocument(request.auth.uid, docId, request.resource.data)
+        && request.resource.data.compras_realizadas == 1;
+      allow update: if isRegisteredAuth()
+        && resource.data.user_id == request.auth.uid
+        && validPurchaseLimitDocument(request.auth.uid, docId, request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'compras_realizadas',
+          'ultima_compra_id',
+          'updated_at'
+        ])
+        && request.resource.data.created_at == resource.data.created_at
+        && request.resource.data.compras_realizadas == resource.data.compras_realizadas + 1;
+      allow delete: if false;
+    }
+
+    // ── Contas Bancárias ──────────────────────────────────────────────────────
+    match /bancarios/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // Caminho legado: permite migrar ou remover apenas a própria conta antiga.
+    match /sys_t111/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // ── Recargas ──────────────────────────────────────────────────────────────
+    match /paymentbot/{docId} {
+      allow read: if isAuth() && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create: if isRegisteredAuth()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.id == docId
+        && request.resource.data.valor is number
+        && request.resource.data.valor >= 3000
+        && request.resource.data.valor <= 500000
+        && request.resource.data.status == 'pendente'
+        && request.resource.data.metodo_pagamento in ['bank_transfer', 'digital_wallet', 'multicaixa_express']
+        && request.resource.data.detalhes_transacao is map
+        && request.resource.data.keys().hasOnly([
+          'id', 'user_id', 'bank_id', 'valor', 'banco_destino',
+          'chave_transacao', 'metodo_pagamento', 'status',
+          'created_at', 'updated_at', 'detalhes_transacao'
+        ])
+        && (
+          (request.resource.data.metodo_pagamento == 'bank_transfer'
+            && request.resource.data.detalhes_transacao.keys().hasOnly(['nome_proprietario', 'banco_iban'])
+            && request.resource.data.detalhes_transacao.keys().hasAll(['nome_proprietario', 'banco_iban']))
+          || (request.resource.data.metodo_pagamento == 'digital_wallet'
+            && request.resource.data.detalhes_transacao.keys().hasOnly([
+              'nome_proprietario', 'endereco_carteira', 'rede_carteira'
+            ])
+            && request.resource.data.detalhes_transacao.keys().hasAll([
+              'nome_proprietario', 'endereco_carteira', 'rede_carteira'
+            ]))
+          || (request.resource.data.metodo_pagamento == 'multicaixa_express'
+              && request.resource.data.detalhes_transacao.keys().hasOnly(['multicaixaexpress'])
+              && request.resource.data.detalhes_transacao.keys().hasAll(['multicaixaexpress']))
+        );
+      allow update: if isRegisteredAuth()
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.get('user_id', null) == resource.data.user_id
+        && request.resource.data.get('id', null) == resource.data.get('id', null)
+        && resource.data.get('status', null) in ['recarregando', 'pendente', 'pending']
+        && (
+          (resource.data.get('status', null) == 'pendente'
+            && request.resource.data.get('status', null) == resource.data.get('status', null))
+          || (resource.data.get('status', null) in ['recarregando', 'pending']
+            && request.resource.data.get('status', null) == 'pendente')
+        )
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'detalhes_transacao', 'updated_at'
+        ]);
+      allow delete: if isRegisteredAuth()
+        && resource.data.user_id == request.auth.uid
+        && resource.data.get('status', null) in ['recarregando', 'pendente', 'pending'];
+    }
+
+    // ── Retiradas ─────────────────────────────────────────────────────────────
+    match /retiradas/{docId} {
+      allow get: if isRegisteredAuth() && (
+        (resource == null && docId.matches('^' + request.auth.uid + '_[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
+        || (resource != null && resource.data.user_id == request.auth.uid)
+      );
+      allow list: if isRegisteredAuth() && resource.data.user_id == request.auth.uid;
+      allow create: if isRegisteredAuth()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.id == docId
+        && request.resource.data.keys().hasAll([
+          'id',
+          'user_id',
+          'valor',
+          'valor_bruto',
+          'valor_liquido',
+          'status',
+          'dados_bancarios_snapshot',
+          'created_at',
+          'updated_at'
+        ])
+        && docId.matches('^' + request.auth.uid + '_[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.valor is number
+        && request.resource.data.valor >= 3000
+        && request.resource.data.valor <= 500000
+        && request.resource.data.valor_bruto == request.resource.data.valor
+        && request.resource.data.valor_liquido is number
+        && request.resource.data.valor_liquido == request.resource.data.valor_bruto * 0.88
+        && request.resource.data.status == 'pendente'
+        && request.resource.data.dados_bancarios_snapshot is map
+        && validWithdrawalBankSnapshot(request.auth.uid, request.resource.data.dados_bancarios_snapshot)
+        && existsAfter(userPath(request.auth.uid))
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.type == 'withdrawal'
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.document_id == docId
+        && getAfter(userPath(request.auth.uid)).data.balance
+          == get(userPath(request.auth.uid)).data.balance - request.resource.data.valor
+        && getAfter(userPath(request.auth.uid)).data.total_retirado
+          == get(userPath(request.auth.uid)).data.get('total_retirado', 0) + request.resource.data.valor
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'user_id',
+          'valor',
+          'valor_bruto',
+          'valor_liquido',
+          'status',
+          'dados_bancarios_snapshot',
+          'created_at',
+          'updated_at'
+        ]);
+      allow update, delete: if false;
+    }
+
+    // Histórico legado: leitura própria apenas; novas retiradas usam /retiradas.
+    match /retiradas_mcpn/{docId} {
+      allow read: if isRegisteredAuth() && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    // ── Extrato Geral ─────────────────────────────────────────────────────────
+    match /extrato_mcpn/{docId} {
+      allow read: if isRegisteredAuth() && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create: if isRegisteredAuth()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.related_document_id is string
+        && (
+          (request.resource.data.tipo == 'compra_produto'
+            && request.resource.data.valor is number
+            && existsAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id))
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.user_id == request.auth.uid
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.preco_pago == request.resource.data.valor)
+          || (request.resource.data.tipo == 'renda_diaria'
+            && request.resource.data.id == docId
+            && request.resource.data.keys().hasAll([
+              'id',
+              'user_id',
+              'tipo',
+              'valor',
+              'related_document_id',
+              'detalhes',
+              'created_at'
+            ])
+            && request.resource.data.keys().hasOnly([
+              'id',
+              'user_id',
+              'tipo',
+              'valor',
+              'related_document_id',
+              'detalhes',
+              'created_at'
+            ])
+            && request.resource.data.valor is number
+            && request.resource.data.valor > 0
+            && request.resource.data.detalhes is map
+            && request.resource.data.created_at == request.time
+            && existsAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id))
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.user_id == request.auth.uid
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.last_income_id == docId
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.last_income_at == request.time
+            && getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.renda_diaria == request.resource.data.valor
+            && request.resource.data.detalhes.produto_id == getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.produto_id
+            && request.resource.data.detalhes.produto_nome == getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.produto_nome
+            && request.resource.data.detalhes.dias_restantes == getAfter(/databases/$(database)/documents/sys_600/$(request.resource.data.related_document_id)).data.dias_restantes)
+          || (request.resource.data.tipo == 'saque'
+            && request.resource.data.valor is number
+            && existsAfter(/databases/$(database)/documents/retiradas/$(request.resource.data.related_document_id))
+            && getAfter(/databases/$(database)/documents/retiradas/$(request.resource.data.related_document_id)).data.user_id == request.auth.uid
+            && getAfter(/databases/$(database)/documents/retiradas/$(request.resource.data.related_document_id)).data.valor == request.resource.data.valor)
+        );
+      allow update, delete: if false;
+    }
+
+    // ── Cupons ────────────────────────────────────────────────────────────────
+    match /cupons/{docId} {
+      allow read: if isRegisteredAuth();
+      allow create: if false;
+      allow update: if isRegisteredAuth()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'resgates',
+          'usos_restantes',
+          'ativo',
+          'updated_at'
+        ])
+        && request.resource.data.get('codigo_cupom', null) == resource.data.get('codigo_cupom', null)
+        && request.resource.data.get('valor', null) == resource.data.get('valor', null)
+        && resource.data.ativo == true
+        && resource.data.valor is number
+        && resource.data.valor > 0
+        && request.resource.data.resgates is list
+        && request.resource.data.resgates.size() == resource.data.get('resgates', []).size() + 1
+        && request.resource.data.resgates[request.resource.data.resgates.size() - 1].user_id == request.auth.uid
+        && request.resource.data.resgatados_user_ids is list
+        && (
+          (resource.data.keys().hasAny(['resgatados_user_ids'])
+            && request.resource.data.resgatados_user_ids.hasAll(resource.data.resgatados_user_ids)
+            && request.resource.data.resgatados_user_ids.size() == resource.data.resgatados_user_ids.size() + 1)
+          || (!resource.data.keys().hasAny(['resgatados_user_ids'])
+            && request.resource.data.resgatados_user_ids.size() == request.resource.data.resgates.size())
+        )
+        && request.auth.uid in request.resource.data.resgatados_user_ids
+        && !(request.auth.uid in resource.data.get('resgatados_user_ids', []))
+        && (resource.data.get('usos_restantes', null) == null
+          ? request.resource.data.get('usos_restantes', null) == null
+          : request.resource.data.usos_restantes == resource.data.usos_restantes - 1)
+        && request.resource.data.ativo == (request.resource.data.get('usos_restantes', null) == null
+          || request.resource.data.usos_restantes > 0)
+        && existsAfter(userPath(request.auth.uid))
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.type == 'coupon'
+        && getAfter(userPath(request.auth.uid)).data.last_financial_operation.coupon_id == docId
+        && getAfter(userPath(request.auth.uid)).data.balance
+          == get(userPath(request.auth.uid)).data.balance + resource.data.valor;
+      allow delete: if false;
+    }
+
+    // ── Chat do Grupo ─────────────────────────────────────────────────────────
+    match /chat_gruop/{docId} {
+      allow read: if isAuth();
+      allow create: if isAuth()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'uid_emissor',
+          'data_registrada',
+          'mensagem',
+          'detalhes',
+          'readersAtSend',
+          'readBy'
+        ])
+        && request.resource.data.keys().hasAll([
+          'id',
+          'uid_emissor',
+          'data_registrada',
+          'mensagem',
+          'detalhes'
+        ])
+        && (!request.resource.data.keys().hasAny(['readersAtSend'])
+          || (request.resource.data.readersAtSend is list
+            && request.resource.data.readersAtSend.size() <= 5000
+            && request.auth.uid in request.resource.data.readersAtSend))
+        && (!request.resource.data.keys().hasAny(['readBy'])
+          || (request.resource.data.readBy is list
+            && request.resource.data.readBy.size() <= 5000
+            && request.resource.data.readBy.hasOnly([request.auth.uid])))
+        && request.resource.data.id == docId
+        && request.resource.data.uid_emissor == request.auth.uid
+        && request.resource.data.data_registrada is string
+        && request.resource.data.mensagem is string
+        && request.resource.data.detalhes is map;
+      allow update: if isRegisteredAuth()
+        && (
+          (resource.data.uid_emissor == request.auth.uid
+            && request.resource.data.uid_emissor == resource.data.uid_emissor
+            && request.resource.data.id == resource.data.id
+            && request.resource.data.data_registrada == resource.data.data_registrada
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'mensagem',
+              'detalhes'
+            ]))
+          || (isRegisteredAuth()
+            && request.auth.uid in resource.data.get('readersAtSend', [])
+            && resource.data.readersAtSend.hasAll(request.resource.data.readersAtSend)
+            && request.resource.data.readBy is list
+            && request.resource.data.readBy.hasAll(resource.data.get('readBy', []))
+            && !(request.auth.uid in resource.data.get('readBy', []))
+            && request.auth.uid in request.resource.data.readBy
+            && request.resource.data.readBy.size()
+              == resource.data.get('readBy', []).size() + 1
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']))
+          || (request.resource.data.uid_emissor == resource.data.uid_emissor
+            && request.resource.data.id == resource.data.id
+            && request.resource.data.data_registrada == resource.data.data_registrada
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['detalhes'])
+            && request.resource.data.detalhes.diff(resource.data.detalhes).affectedKeys().hasOnly(['reacoes'])
+            && request.resource.data.detalhes.reacoes.diff(resource.data.detalhes.get('reacoes', {}))
+              .affectedKeys().size() == 1
+            && request.resource.data.detalhes.reacoes.diff(resource.data.detalhes.get('reacoes', {}))
+              .affectedKeys().hasOnly(['👍', '❤️', '👏'])
+            && (
+              request.auth.uid in request.resource.data.detalhes.reacoes.get('👍', [])
+              || request.auth.uid in request.resource.data.detalhes.reacoes.get('❤️', [])
+              || request.auth.uid in request.resource.data.detalhes.reacoes.get('👏', [])
+              || request.auth.uid in resource.data.detalhes.get('reacoes', {}).get('👍', [])
+              || request.auth.uid in resource.data.detalhes.get('reacoes', {}).get('❤️', [])
+              || request.auth.uid in resource.data.detalhes.get('reacoes', {}).get('👏', [])
+            ))
+        );
+      allow delete: if isAuth()
+        && resource.data.uid_emissor == request.auth.uid;
+    }
+
+    // ── Chat Privado (Conversas) ──────────────────────────────────────────────
+    match /conversations/{convId} {
+      allow get: if isRegisteredAuth()
+        && conversationIdAllowsMember(convId)
+        && (!exists(/databases/$(database)/documents/conversations/$(convId)
+          ) || validConversationData(convId, resource.data));
+      allow list: if false;
+      allow create: if isRegisteredAuth()
+        && validConversationData(convId, request.resource.data)
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.lastSenderId == request.auth.uid;
+      allow update: if isRegisteredAuth()
+        && validConversationData(convId, resource.data)
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.participants == resource.data.participants
+        && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'lastMessage', 'lastMessageAt', 'lastSenderId', 'unreadCounts'
+            ]) && request.resource.data.lastSenderId == request.auth.uid)
+          || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unreadCounts']));
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        allow read: if canReadConversation(convId);
+        allow create: if canReadConversation(convId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.recipientId in get(
+            /databases/$(database)/documents/conversations/$(convId)
+          ).data.participants
+          && request.resource.data.recipientId != request.auth.uid;
+        allow update: if canReadConversation(convId)
+          && (
+            (resource.data.recipientId == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+              && request.resource.data.read == true)
+            || (resource.data.senderId == request.auth.uid
+              && resource.data.get('details', {}).get('tipo_midia', 'text') == 'text'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'message',
+                'details',
+                'editedAt'
+              ])
+              && request.resource.data.message is string
+              && request.resource.data.message.size() > 0
+              && request.resource.data.message.size() <= 10000
+              && request.resource.data.details.diff(resource.data.get('details', {})).affectedKeys()
+                .hasOnly(['editado', 'editado_em'])
+              && request.resource.data.details.editado == true
+              && request.resource.data.details.editado_em is string
+              && request.resource.data.editedAt is timestamp)
+          );
+        allow delete: if canReadConversation(convId)
+          && resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // ── Mensagens da Comunidade ───────────────────────────────────────────────
+    match /community_messages/{docId} {
+      allow read: if isRegisteredAuth();
+      allow create: if isRegisteredAuth()
+        && request.resource.data.keys().hasOnly([
+          'senderId',
+          'senderName',
+          'senderAvatar',
+          'message',
+          'details',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'senderId',
+          'message',
+          'details',
+          'createdAt'
+        ])
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 10000
+        && request.resource.data.details is map
+        && request.resource.data.createdAt is timestamp
+        && (!request.resource.data.keys().hasAny(['senderName'])
+          || request.resource.data.senderName is string)
+        && (!request.resource.data.keys().hasAny(['senderAvatar'])
+          || request.resource.data.senderAvatar is string);
+      allow update: if false;
+      allow delete: if isRegisteredAuth() && resource.data.senderId == request.auth.uid;
+    }
+
+    // ── Bancos de Arrecadação (leitura autenticada) ───────────────────────────
+    match /pasta/{docId} {
+      allow read: if isAuth();
+      allow write: if false;
+
+      match /paycarteiradigital/{methodId} {
+        allow read: if isAuth() && resource.data.get('disponibilidade', false) == true;
+        allow write: if false;
+      }
+    }
+
+    // ── Notificações (sacola) ─────────────────────────────────────────────────
+    match /sacola/{docId} {
+      allow read: if isRegisteredAuth() && (resource == null || resource.data.user_id == request.auth.uid);
+      allow create: if isRegisteredAuth()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'user_id',
+          'title',
+          'body',
+          'payload',
+          'status',
+          'created_at'
+        ])
+        && request.resource.data.id == docId
+        && request.resource.data.status == 'pending';
+      allow update, delete: if false;
+    }
+
+    // ── Equipa (rede de referidos) ─────────────────────────────────────────────
+    match /equipe_mcpn/{docId} {
+      allow read: if isAuth();
+      allow create: if isRegisteredAuth()
+        && request.resource.data.usuario_id == request.auth.uid
+        && request.resource.data.patrocinador_id is string
+        && request.resource.data.patrocinador_id != request.auth.uid
+        && request.resource.data.id == docId
+        && docId == request.resource.data.patrocinador_id + '_' + request.auth.uid
+        && request.resource.data.codigo_convite_usado is string
+        && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.codigo_convite_ref == request.resource.data.codigo_convite_usado
+        && exists(userPath(request.resource.data.patrocinador_id))
+        && get(userPath(request.resource.data.patrocinador_id)).data.codigo_meu_refferal == request.resource.data.codigo_convite_usado;
+      allow update, delete: if false;
+    }
+
+    // ── Typing Status ─────────────────────────────────────────────────────────
+    match /typing_status/{docId} {
+      allow read: if isAuth() && (
+        resource.data.get('chatRoomId', null) == 'community'
+        || resource.data.get('targetId', null) == request.auth.uid
+        || resource.data.get('userId', null) == request.auth.uid
+      );
+      allow create: if isAuth()
+        && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuth()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuth()
+        && resource.data.userId == request.auth.uid;
+    }
+
+    // ── Presença autenticada ──────────────────────────────────────────────────
+    match /presence_sessions/{sessionId} {
+      allow read: if isRegisteredAuth();
+      allow create: if isRegisteredAuth()
+        && sessionId == request.auth.uid
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.lastSeenAt is timestamp
+        && request.resource.data.expiresAt is timestamp;
+      allow update: if isRegisteredAuth()
+        && sessionId == request.auth.uid
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.user_id == resource.data.user_id
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'expiresAt'])
+        && request.resource.data.lastSeenAt is timestamp
+        && request.resource.data.expiresAt is timestamp;
+      allow delete: if isRegisteredAuth()
+        && sessionId == request.auth.uid
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // ── Ficheiros de chats guardados em partes no Firestore ──────────────────
+    match /chat_files/{fileId} {
+      allow read: if isAuth() && (
+        resource.data.ownerId == request.auth.uid ||
+        canReadChatFile(resource.data.roomId)
+      );
+      allow create: if isAuth()
+        && request.resource.data.ownerId == request.auth.uid
+        && (request.resource.data.roomId == 'community'
+          || request.resource.data.roomId == 'public'
+          || canReadConversation(request.resource.data.roomId))
+        && request.resource.data.keys().hasOnly([
+          'fileName',
+          'mimeType',
+          'sizeBytes',
+          'chunkCount',
+          'ownerId',
+          'roomId',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'fileName',
+          'mimeType',
+          'sizeBytes',
+          'chunkCount',
+          'ownerId',
+          'roomId',
+          'createdAt'
+        ])
+        && request.resource.data.sizeBytes > 0
+        && request.resource.data.sizeBytes <= 15728640
+        && request.resource.data.chunkCount > 0
+        && request.resource.data.chunkCount <= 40
+        && request.resource.data.roomId is string;
+      allow update: if false;
+      allow delete: if isAuth() && resource.data.ownerId == request.auth.uid;
+
+      match /chunks/{chunkId} {
+        allow read: if canReadFile(fileId);
+        allow create: if isAuth()
+          && canReadFile(fileId)
+          && request.resource.data.ownerId == request.auth.uid
+          && request.resource.data.fileId == fileId
+          && request.resource.data.keys().hasOnly(['fileId', 'ownerId', 'index', 'bytes'])
+          && request.resource.data.keys().hasAll(['fileId', 'ownerId', 'index', 'bytes'])
+          && request.resource.data.index is int
+          && request.resource.data.bytes is bytes
+          && request.resource.data.bytes.size() <= 393216;
+        allow update: if false;
+        allow delete: if canReadFile(fileId)
+          && get(/databases/$(database)/documents/chat_files/$(fileId)).data.ownerId == request.auth.uid;
+      }
+    }
+
+    // ── Push Subscriptions ────────────────────────────────────────────────────
+    match /push_subscriptions/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isRegisteredAuth() && resource.data.user_id == request.auth.uid;
+      allow create: if isRegisteredAuth()
+        && notificationId == request.resource.data.message_id + '_' + request.auth.uid
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.type == 'group_message'
+        && request.resource.data.sender_id is string
+        && request.resource.data.sender_id != request.auth.uid
+        && request.resource.data.message_id is string
+        && request.resource.data.title is string
+        && request.resource.data.body is string
+        && request.resource.data.url == '/grupo'
+        && request.resource.data.read == false
+        && request.resource.data.keys().hasOnly([
+          'user_id',
+          'type',
+          'message_id',
+          'sender_id',
+          'title',
+          'body',
+          'url',
+          'read',
+          'delivery_status',
+          'created_at'
+        ])
+        && exists(/databases/$(database)/documents/chat_gruop/$(request.resource.data.message_id))
+        && get(/databases/$(database)/documents/chat_gruop/$(request.resource.data.message_id)).data.uid_emissor
+          == request.resource.data.sender_id;
+      allow update: if isRegisteredAuth()
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        && request.resource.data.read is bool;
+      allow delete: if false;
+    }
+
+    // ── Links de atendimento (leitura pública) ────────────────────────────────
+    match /atendimento_links/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Schemas de migração (apenas leitura interna) ──────────────────────────
+    match /{collection}/{docId} {
+      allow read: if (isAuth() && docId == '_schema')
+        || (isRegisteredAuth() && collection == 'suporte_externo');
+      allow write: if false;
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Teggram-X Painel Administrativo",
+  "description": "Área administrativa segura para gestão de recargas, saques, comprovativos, dados bancários e produtos do Teggram-X.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
