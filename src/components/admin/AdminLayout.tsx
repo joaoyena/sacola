@@ -11,7 +11,6 @@ import {
   Menu,
   X,
   Bell,
-  Cpu,
   Ticket,
   Download,
 } from 'lucide-react';
@@ -83,7 +82,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
           {/* Brand */}
           <div className="p-5 border-b border-slate-800 flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center text-white shadow-md shadow-cyan-900/40">
-              <Cpu className="w-5 h-5" />
+            <img src="/logo.jpg" alt="PAINGRAMX" className="h-9 w-9 rounded-lg object-contain" />
             </div>
             <div>
               <div className="flex items-center gap-1.5">
@@ -166,9 +165,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
           <header className="lg:hidden bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-lg bg-cyan-600 flex items-center justify-center text-white">
-                <Cpu className="w-4 h-4" />
+                <img src="/logo.jpg" alt="PAINGRAMX" className="h-7 w-7 rounded-md object-contain" />
               </div>
-              <span className="font-bold text-sm text-white">Teggram-X Admin</span>
+              <span className="font-bold text-sm text-white">SGNUF</span>
             </div>
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { LockKeyhole, Cpu, Loader2, UserPlus } from 'lucide-react';
+import { LockKeyhole, Loader2, UserPlus } from 'lucide-react';
 import { useAdminAuth } from '../../context/AdminAuthContext';
 import { GoogleToast } from '../../components/common/GoogleToast';
 
@@ -68,10 +68,10 @@ export const AdminLogin: React.FC = () => {
       <div className="w-full max-w-md relative z-10">
         <div className="text-center mb-8">
           <div className="inline-flex w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-600 to-blue-600 items-center justify-center text-white shadow-xl shadow-cyan-950/60 mb-4 ring-1 ring-white/10">
-            <Cpu className="w-8 h-8" />
+            <img src="/logo.jpg" alt="PAINGRAMX" className="h-14 w-14 rounded-xl object-contain" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-white">
-            Teggram-X <span className="text-cyan-400">Admin Sentinel</span>
+            SGNUF
           </h1>
           <p className="text-xs text-slate-400 mt-1.5">
             {isRegistering ? 'Cadastro seguro do administrador autorizado' : 'Acesso seguro através da conta Firebase autorizada'}
@@ -90,7 +90,7 @@ export const AdminLogin: React.FC = () => {
         <form onSubmit={handleSubmit} className="bg-slate-900/85 border border-slate-800/80 rounded-2xl p-7 shadow-2xl backdrop-blur-xl ring-1 ring-white/5 space-y-4.5">
           <div>
             <label htmlFor="admin-email" className="text-xs text-slate-300 font-medium block mb-1.5">
-              Email
+              Por favor digite o email
             </label>
             <input
               id="admin-email"
@@ -108,7 +108,7 @@ export const AdminLogin: React.FC = () => {
 
           <div>
             <label htmlFor="admin-password" className="text-xs text-slate-300 font-medium block mb-1.5">
-              Palavra-passe
+              Por favor digite a palavra-passe
             </label>
             <input
               id="admin-password"

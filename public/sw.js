@@ -1,10 +1,11 @@
-const CACHE_NAME = 'teggram-admin-v1';
+const CACHE_NAME = 'teggram-admin-v3';
 const APP_SHELL = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/logo.jpg',
 ];
 
 self.addEventListener('install', (event) => {
@@ -67,16 +68,17 @@ self.addEventListener('fetch', (event) => {
     || request.destination === 'font'
   ) {
     event.respondWith(
-      caches.match(request).then((cached) => {
-        if (cached) return cached;
-        return fetch(request).then((response) => {
+      fetch(request).then((response) => {
           if (response.ok && response.type === 'basic') {
             const copy = response.clone();
             void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
           }
           return response;
-        });
-      }),
+        }).catch(async () => {
+          const cached = await caches.match(request);
+          if (cached) return cached;
+          throw new Error(`Recurso offline não encontrado na cache: ${request.url}`);
+        }),
     );
   }
 });
