@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
 import { DecodedIdToken, getAuth } from 'firebase-admin/auth';
@@ -1564,21 +1565,60 @@ adminRouter.get('/audit-logs', asyncRoute(async (req, res) => {
 
 app.use('/api/admin', adminRouter);
 
-const isProduction = process.env.NODE_ENV === 'production';
-if (!isProduction) {
-  const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
-  app.use(vite.middlewares);
-} else {
-  const distDir = path.resolve(process.cwd(), 'dist');
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
+const distDir = path.resolve(rootDir, 'dist');
+const indexHtmlPath = path.join(distDir, 'index.html');
+
+const hasDist = fs.existsSync(indexHtmlPath);
+const isProduction = process.env.NODE_ENV === 'production' || hasDist;
+
+if (hasDist) {
   app.use(express.static(distDir));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/') || !req.accepts('html')) {
       next();
       return;
     }
-    res.sendFile(path.join(distDir, 'index.html'), (error) => {
+    res.sendFile(indexHtmlPath, (error) => {
       if (error) next(error);
     });
+  });
+} else if (!isProduction) {
+  const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
+  app.use(vite.middlewares);
+  app.get('*', async (req, res, next) => {
+    if (req.path.startsWith('/api/') || !req.accepts('html')) {
+      next();
+      return;
+    }
+    try {
+      const template = fs.readFileSync(path.resolve(rootDir, 'index.html'), 'utf-8');
+      const html = await vite.transformIndexHtml(req.originalUrl, template);
+      res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
+    } catch (e) {
+      next(e);
+    }
+  });
+} else {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/') || !req.accepts('html')) {
+      next();
+      return;
+    }
+    res.status(503).send(`
+      <!DOCTYPE html>
+      <html lang="pt">
+      <head><meta charset="utf-8"><title>Compilação Pendente</title></head>
+      <body style="font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #0f172a; color: #f8fafc;">
+        <div style="background: #1e293b; padding: 32px; border-radius: 12px; max-width: 500px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+          <h2 style="color: #38bdf8; margin-top: 0;">Ficheiros de produção não encontrados</h2>
+          <p>O directório <code>dist/</code> não existe no Render. Certifique-se de que o <strong>Build Command</strong> nas configurações do Render é:</p>
+          <div style="background: #0f172a; padding: 12px; border-radius: 6px; font-family: monospace; color: #4ade80; margin: 16px 0;">npm install && npm run build</div>
+          <p style="font-size: 14px; color: #94a3b8;">Em seguida, clique em <strong>Manual Deploy &gt; Deploy latest commit</strong>.</p>
+        </div>
+      </body>
+      </html>
+    `);
   });
 }
 
@@ -1595,11 +1635,12 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     && error.code === 'app/invalid-credential'
   ) {
     res.status(503).json({
-      error: 'O servidor ainda não tem credenciais do Firebase Admin. Configure GOOGLE_APPLICATION_CREDENTIALS com o caminho do JSON da conta de serviço e reinicie npm run dev.',
+      error: 'O servidor ainda não tem credenciais do Firebase Admin. Configure FIREBASE_SERVICE_ACCOUNT_JSON ou GOOGLE_APPLICATION_CREDENTIALS.',
     });
     return;
   }
-  res.status(500).json({ error: 'Ocorreu um erro interno ao processar o pedido.' });
+  const errorMessage = error instanceof Error ? error.message : 'Ocorreu um erro interno ao processar o pedido.';
+  res.status(500).json({ error: errorMessage });
 });
 
 const port = Number(process.env.PORT) || 3000;
