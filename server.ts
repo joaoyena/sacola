@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import fs from 'fs';
 import path from 'path';
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
@@ -73,6 +74,19 @@ function createFirebaseApp() {
       throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON não contém JSON válido.');
     }
     return initializeApp({ credential: cert(serviceAccount), projectId });
+  }
+
+  try {
+    const localKeyFiles = fs.readdirSync(process.cwd()).filter((f) =>
+      (f.includes('firebase-adminsdk') || f.startsWith('service-account')) && f.endsWith('.json')
+    );
+    if (localKeyFiles.length > 0) {
+      const fileContent = fs.readFileSync(path.resolve(process.cwd(), localKeyFiles[0]), 'utf-8');
+      const serviceAccount = JSON.parse(fileContent);
+      return initializeApp({ credential: cert(serviceAccount), projectId });
+    }
+  } catch (err) {
+    console.warn('Aviso ao procurar credencial local do Firebase Admin:', err);
   }
 
   return initializeApp({ credential: applicationDefault(), projectId });
