@@ -24,6 +24,12 @@ bun run dev
 
 Abra `http://localhost:3000`. A API lê e grava as coleções `users`, `paymentbot`, `retiradas`, `produtos`, `cupons`, `pasta`, `extrato_mcpn` e `admin_audit_logs` no Firestore configurado. No painel, a secção **Cupons** permite gerar códigos, definir o valor, ativar/desativar, editar e excluir cupons; a criação prepara os campos de resgate usados pela aplicação e as alterações administrativas são auditadas. Aprovações financeiras e respetiva auditoria são gravadas numa transação Firestore.
 
+## Instalar como aplicação (PWA)
+
+O painel inclui manifesto, ícones e service worker. Em produção, publique-o num domínio HTTPS (ou teste em `localhost`); navegadores compatíveis apresentam **Instalar aplicação** no menu do painel ou a opção de instalação do próprio navegador. No iPhone/iPad, abra o painel no Safari, toque em **Partilhar** e escolha **Adicionar ao ecrã principal**.
+
+O service worker mantém em cache apenas o shell e recursos estáticos da aplicação para permitir abrir a interface sem ligação. Pedidos à API (`/api/`) nunca são guardados em cache; autenticação, dados e ações administrativas continuam a exigir ligação à internet.
+
 Para validar a compilação frontend:
 
 ```bash

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   LayoutDashboard,
   ArrowDownLeft,
@@ -13,8 +13,14 @@ import {
   Bell,
   Cpu,
   Ticket,
+  Download,
 } from 'lucide-react';
 import { useAdminAuth } from '../../context/AdminAuthContext';
+
+interface InstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+}
 
 interface AdminLayoutProps {
   currentTab: string;
@@ -25,6 +31,22 @@ interface AdminLayoutProps {
 export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTab, children }) => {
   const { user, logout } = useAdminAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    const handleInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const handleInstalled = () => setInstallPrompt(null);
+
+    window.addEventListener('beforeinstallprompt', handleInstallPrompt);
+    window.addEventListener('appinstalled', handleInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
+      window.removeEventListener('appinstalled', handleInstalled);
+    };
+  }, []);
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -40,6 +62,17 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
   const handleNavClick = (tab: string) => {
     onSelectTab(tab);
     setMobileMenuOpen(false);
+  };
+
+  const handleInstall = async () => {
+    if (!installPrompt) return;
+    try {
+      await installPrompt.prompt();
+      await installPrompt.userChoice;
+      setInstallPrompt(null);
+    } catch (error) {
+      console.error('Não foi possível iniciar a instalação da aplicação:', error);
+    }
   };
 
   return (
@@ -83,6 +116,16 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
                 </button>
               );
             })}
+            {installPrompt && (
+              <button
+                type="button"
+                onClick={() => void handleInstall()}
+                className="mt-4 w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 hover:bg-cyan-500/15 transition-colors"
+              >
+                <Download className="w-4 h-4 text-cyan-400" />
+                <span>Instalar aplicação</span>
+              </button>
+            )}
           </nav>
 
           {/* User profile & Logout */}
@@ -158,6 +201,16 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
                     </button>
                   );
                 })}
+                {installPrompt && (
+                  <button
+                    type="button"
+                    onClick={() => void handleInstall()}
+                    className="mt-3 w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold text-cyan-300 bg-cyan-500/10 border border-cyan-500/25"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Instalar aplicação</span>
+                  </button>
+                )}
               </nav>
               <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
                 <span className="text-xs text-slate-400 truncate max-w-[200px]">
