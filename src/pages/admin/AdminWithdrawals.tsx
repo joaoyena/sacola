@@ -15,6 +15,7 @@ import { WithdrawalItem } from '../../types/admin';
 import { adminApi } from '../../services/adminApi';
 import { formatCurrency, parseFinancialValue } from '../../lib/adminLogic';
 import { ConfirmDialog } from '../../components/admin/ConfirmDialog';
+import { GoogleToast } from '../../components/common/GoogleToast';
 
 interface AdminWithdrawalsProps {
   initialFilter?: string;
@@ -153,29 +154,21 @@ export const AdminWithdrawals: React.FC<AdminWithdrawalsProps> = ({ initialFilte
         </button>
       </div>
 
-      {/* Notifications */}
+      {/* Google-style Floating Toast Notifications */}
       {successMessage && (
-        <div className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-800/80 text-emerald-200 text-xs flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            <span>{successMessage}</span>
-          </div>
-          <button onClick={() => setSuccessMessage(null)} className="text-emerald-400 hover:text-white">
-            ✕
-          </button>
-        </div>
+        <GoogleToast
+          type="success"
+          message={successMessage}
+          onClose={() => setSuccessMessage(null)}
+        />
       )}
 
       {error && (
-        <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-800/80 text-rose-200 text-xs flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-400" />
-            <span>{error}</span>
-          </div>
-          <button onClick={() => setError(null)} className="text-rose-400 hover:text-white">
-            ✕
-          </button>
-        </div>
+        <GoogleToast
+          type="error"
+          message={error}
+          onClose={() => setError(null)}
+        />
       )}
 
       {/* Search and Filters */}

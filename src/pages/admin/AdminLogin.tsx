@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { LockKeyhole, ShieldAlert, Cpu, Loader2, CheckCircle2, UserPlus, X } from 'lucide-react';
+import { LockKeyhole, Cpu, Loader2, UserPlus } from 'lucide-react';
 import { useAdminAuth } from '../../context/AdminAuthContext';
+import { GoogleToast } from '../../components/common/GoogleToast';
 
 interface LoginToast {
   type: 'success' | 'error';
@@ -78,35 +79,17 @@ export const AdminLogin: React.FC = () => {
         </div>
 
         {toast && (
-          <div
-            role={toast.type === 'error' ? 'alert' : 'status'}
-            className={`fixed right-4 top-4 z-50 flex w-[calc(100%-2rem)] max-w-sm items-start gap-3 rounded-xl border p-4 text-sm shadow-2xl ${
-              toast.type === 'error'
-                ? 'border-rose-800/60 bg-rose-950/95 text-rose-100'
-                : 'border-emerald-800/60 bg-emerald-950/95 text-emerald-100'
-            }`}
-          >
-            {toast.type === 'error'
-              ? <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
-              : <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />}
-            <div className="min-w-0 flex-1">
-              <p className="font-semibold">{toast.title}</p>
-              <p className="mt-1 break-words leading-relaxed opacity-90">{toast.message}</p>
-            </div>
-            <button
-              type="button"
-              aria-label="Fechar notificação"
-              onClick={() => setToast(null)}
-              className="rounded p-1 opacity-70 transition hover:bg-white/10 hover:opacity-100"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
+          <GoogleToast
+            type={toast.type}
+            title={toast.title}
+            message={toast.message}
+            onClose={() => setToast(null)}
+          />
         )}
 
-        <form onSubmit={handleSubmit} className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur-md space-y-4">
+        <form onSubmit={handleSubmit} className="bg-slate-900/85 border border-slate-800/80 rounded-2xl p-7 shadow-2xl backdrop-blur-xl ring-1 ring-white/5 space-y-4.5">
           <div>
-            <label htmlFor="admin-email" className="text-xs text-slate-300 font-medium block mb-1">
+            <label htmlFor="admin-email" className="text-xs text-slate-300 font-medium block mb-1.5">
               Email
             </label>
             <input
@@ -114,16 +97,17 @@ export const AdminLogin: React.FC = () => {
               type="email"
               autoComplete="username"
               required
+              placeholder="admin@exemplo.com"
               value={email}
               onChange={(event) => {
                 setEmail(event.target.value);
               }}
-              className="w-full px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              className="w-full px-3.5 py-2.5 text-sm bg-slate-950/80 border border-slate-800 rounded-xl text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/25 focus:border-cyan-400 transition-all"
             />
           </div>
 
           <div>
-            <label htmlFor="admin-password" className="text-xs text-slate-300 font-medium block mb-1">
+            <label htmlFor="admin-password" className="text-xs text-slate-300 font-medium block mb-1.5">
               Palavra-passe
             </label>
             <input
@@ -132,15 +116,16 @@ export const AdminLogin: React.FC = () => {
               autoComplete={isRegistering ? 'new-password' : 'current-password'}
               minLength={isRegistering ? 6 : undefined}
               required
+              placeholder="••••••••"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              className="w-full px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              className="w-full px-3.5 py-2.5 text-sm bg-slate-950/80 border border-slate-800 rounded-xl text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/25 focus:border-cyan-400 transition-all"
             />
           </div>
 
           {isRegistering && (
             <div>
-              <label htmlFor="admin-password-confirm" className="text-xs text-slate-300 font-medium block mb-1">
+              <label htmlFor="admin-password-confirm" className="text-xs text-slate-300 font-medium block mb-1.5">
                 Confirmar palavra-passe
               </label>
               <input
@@ -149,9 +134,10 @@ export const AdminLogin: React.FC = () => {
                 autoComplete="new-password"
                 minLength={6}
                 required
+                placeholder="••••••••"
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
-                className="w-full px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                className="w-full px-3.5 py-2.5 text-sm bg-slate-950/80 border border-slate-800 rounded-xl text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/25 focus:border-cyan-400 transition-all"
               />
               {confirmPassword && password !== confirmPassword && (
                 <p className="mt-1 text-xs text-rose-300">As palavras-passe não coincidem.</p>
@@ -162,7 +148,7 @@ export const AdminLogin: React.FC = () => {
           <button
             type="submit"
             disabled={isLoading || !email.trim() || !password || (isRegistering && password !== confirmPassword)}
-            className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-md shadow-cyan-900/30 transition-all disabled:opacity-50"
+            className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30 hover:shadow-cyan-900/50 active:scale-[0.99] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isLoading
               ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -183,7 +169,7 @@ export const AdminLogin: React.FC = () => {
               setConfirmPassword('');
               clearError();
             }}
-            className="w-full text-xs text-cyan-300 hover:text-cyan-200 transition-colors"
+            className="w-full py-1 text-xs text-cyan-300 hover:text-cyan-200 transition-colors cursor-pointer"
           >
             {isRegistering ? 'Já tem uma conta? Iniciar sessão' : 'Primeiro acesso? Cadastrar administrador'}
           </button>
