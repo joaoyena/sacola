@@ -20,6 +20,7 @@ import {
   validateWithdrawalTransition,
   calculateWithdrawalMutation,
   validateProductData,
+  validateCouponData,
   UserAccount,
   PaymentBotRecord,
   RetiradaRecord,
@@ -282,4 +283,13 @@ test('Product / Bot data normalization and decimal validation', () => {
     limite_compra: 1,
   });
   assert.equal(badId.valid, false);
+});
+
+test('Coupons: normalize and validate redeemable coupon data', () => {
+  const valid = validateCouponData({ codigo_cupom: '  tgx-ab12  ', valor: '2500.50', ativo: true });
+  assert.equal(valid.valid, true);
+  assert.deepEqual(valid.normalized, { codigo_cupom: 'TGX-AB12', valor: 2500.5, ativo: true });
+  assert.equal(validateCouponData({ codigo_cupom: 'ABC', valor: 10, ativo: true }).valid, false);
+  assert.equal(validateCouponData({ codigo_cupom: 'VALID-1', valor: 0, ativo: true }).valid, false);
+  assert.equal(validateCouponData({ codigo_cupom: 'VALID-1', valor: 10 }).valid, false);
 });

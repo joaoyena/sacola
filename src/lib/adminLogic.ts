@@ -149,12 +149,56 @@ export interface ProdutoRecord {
   descricao?: string;
 }
 
+export interface CouponRecord {
+  id: string;
+  codigo_cupom: string;
+  valor: number;
+  ativo: boolean;
+  resgates?: unknown[];
+  resgatados_user_ids?: string[];
+  usos_restantes?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export function validateCouponData(data: {
+  codigo_cupom?: unknown;
+  valor?: unknown;
+  ativo?: unknown;
+}): {
+  valid: boolean;
+  error?: string;
+  normalized?: Pick<CouponRecord, 'codigo_cupom' | 'valor' | 'ativo'>;
+} {
+  const codigo = typeof data.codigo_cupom === 'string'
+    ? data.codigo_cupom.trim().toUpperCase()
+    : '';
+  if (!/^[A-Z0-9_-]{4,32}$/.test(codigo)) {
+    return {
+      valid: false,
+      error: 'O código deve ter entre 4 e 32 caracteres (letras, números, hífen ou sublinhado).',
+    };
+  }
+
+  const valor = typeof data.valor === 'number' || typeof data.valor === 'string'
+    ? Number(data.valor)
+    : Number.NaN;
+  if (!Number.isFinite(valor) || valor <= 0) {
+    return { valid: false, error: 'O valor do cupom deve ser um número superior a zero.' };
+  }
+  if (typeof data.ativo !== 'boolean') {
+    return { valid: false, error: 'O estado do cupom deve ser ativo ou inativo.' };
+  }
+
+  return { valid: true, normalized: { codigo_cupom: codigo, valor, ativo: data.ativo } };
+}
+
 export interface AuditLogRecord {
   id: string;
   admin_uid: string;
   admin_email: string;
   acao: string;
-  entidade: 'paymentbot' | 'retiradas' | 'produtos' | 'pasta' | 'users';
+  entidade: 'paymentbot' | 'retiradas' | 'produtos' | 'pasta' | 'users' | 'cupons';
   entidade_id: string;
   data: string;
   decisao: 'aprovado' | 'rejeitado' | 'criado' | 'atualizado' | 'desativado' | 'ativado' | 'excluido' | 'em_andamento';

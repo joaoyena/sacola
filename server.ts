@@ -9,6 +9,7 @@ import { DocumentData, getFirestore } from 'firebase-admin/firestore';
 import { createServer as createViteServer } from 'vite';
 import {
   AuditLogRecord,
+  CouponRecord,
   PaymentBotRecord,
   ProdutoRecord,
   RetiradaRecord,
@@ -25,6 +26,7 @@ import {
   normalizeWithdrawalStatus,
   parseFinancialValue,
   validateProductData,
+  validateCouponData,
   validateRechargeTransition,
   validateWithdrawalTransition,
 } from './src/lib/adminLogic.ts';
@@ -867,6 +869,195 @@ adminRouter.post('/withdrawals/:id/reject', asyncRoute(async (req, res) => {
 adminRouter.get('/products', asyncRoute(async (_req, res) => {
   const snapshot = await db.collection('produtos').get();
   res.json({ items: snapshot.docs.map((doc) => recordFromSnapshot<ProdutoRecord>(doc)) });
+}));
+
+adminRouter.get('/coupons', asyncRoute(async (_req, res) => {
+  const snapshot = await db.collection('cupons').get();
+  const items = snapshot.docs.map((doc) => {
+    const coupon = doc.data();
+    return {
+      id: doc.id,
+      codigo_cupom: typeof coupon.codigo_cupom === 'string' ? coupon.codigo_cupom : '',
+      valor: typeof coupon.valor === 'number' ? coupon.valor : Number(coupon.valor),
+      ativo: coupon.ativo === true,
+      total_resgates: Array.isArray(coupon.resgates) ? coupon.resgates.length : 0,
+      ...(typeof coupon.usos_restantes === 'number' ? { usos_restantes: coupon.usos_restantes } : {}),
+      ...(typeof coupon.created_at === 'string' ? { created_at: coupon.created_at } : {}),
+      ...(typeof coupon.updated_at === 'string' ? { updated_at: coupon.updated_at } : {}),
+    };
+  }).sort((a, b) => a.codigo_cupom.localeCompare(b.codigo_cupom));
+  res.json({ items });
+}));
+
+adminRouter.post('/coupons', asyncRoute(async (req, res) => {
+  const validation = validateCouponData(req.body || {});
+  if (!validation.valid || !validation.normalized) {
+    res.status(400).json({ error: validation.error || 'Dados do cupom inválidos.' });
+    return;
+  }
+
+  const admin = adminFor(req);
+  const couponRef = db.collection('cupons').doc();
+  const auditRef = db.collection('admin_audit_logs').doc();
+  const now = new Date().toISOString();
+  const coupon: CouponRecord = {
+    id: couponRef.id,
+    ...validation.normalized,
+    resgates: [],
+    resgatados_user_ids: [],
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.runTransaction(async (transaction) => {
+    const duplicates = await transaction.get(
+      db.collection('cupons').where('codigo_cupom', '==', coupon.codigo_cupom).limit(1),
+    );
+    if (!duplicates.empty) {
+      throw new HttpError(409, `Já existe um cupom com o código '${coupon.codigo_cupom}'.`);
+    }
+    transaction.create(couponRef, coupon);
+    transaction.set(auditRef, {
+      id: auditRef.id,
+      admin_uid: admin.uid,
+      admin_email: admin.email,
+      acao: 'CRIAR_CUPOM',
+      entidade: 'cupons',
+      entidade_id: couponRef.id,
+      decisao: 'criado',
+      data: now,
+      dados_novos: {
+        codigo_cupom: coupon.codigo_cupom,
+        valor: coupon.valor,
+        ativo: coupon.ativo,
+      },
+    } satisfies AuditLogRecord);
+  });
+
+  res.status(201).json({
+    success: true,
+    message: `Cupom '${coupon.codigo_cupom}' criado com sucesso.`,
+    coupon: {
+      id: coupon.id,
+      codigo_cupom: coupon.codigo_cupom,
+      valor: coupon.valor,
+      ativo: coupon.ativo,
+      total_resgates: 0,
+      created_at: now,
+      updated_at: now,
+    },
+  });
+}));
+
+adminRouter.patch('/coupons/:id', asyncRoute(async (req, res) => {
+  const id = req.params.id;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+    res.status(400).json({ error: 'Identificador de cupom inválido.' });
+    return;
+  }
+  const validation = validateCouponData(req.body || {});
+  if (!validation.valid || !validation.normalized) {
+    res.status(400).json({ error: validation.error || 'Dados do cupom inválidos.' });
+    return;
+  }
+
+  const couponData = validation.normalized;
+  const admin = adminFor(req);
+  const couponRef = db.collection('cupons').doc(id);
+  const auditRef = db.collection('admin_audit_logs').doc();
+  const now = new Date().toISOString();
+  const result = await db.runTransaction(async (transaction) => {
+    const couponSnapshot = await transaction.get(couponRef);
+    if (!couponSnapshot.exists) throw new HttpError(404, `Cupom '${id}' não encontrado.`);
+    const duplicates = await transaction.get(
+      db.collection('cupons').where('codigo_cupom', '==', couponData.codigo_cupom).limit(2),
+    );
+    if (duplicates.docs.some((doc) => doc.id !== id)) {
+      throw new HttpError(409, `Já existe outro cupom com o código '${couponData.codigo_cupom}'.`);
+    }
+
+    const previous = couponSnapshot.data() || {};
+    const remainingUses = previous.usos_restantes;
+    if (couponData.ativo && typeof remainingUses === 'number' && remainingUses <= 0) {
+      throw new HttpError(409, 'Este cupom já esgotou os resgates disponíveis e não pode ser reativado.');
+    }
+
+    transaction.update(couponRef, {
+      ...couponData,
+      updated_at: now,
+    });
+    transaction.set(auditRef, {
+      id: auditRef.id,
+      admin_uid: admin.uid,
+      admin_email: admin.email,
+      acao: 'ATUALIZAR_CUPOM',
+      entidade: 'cupons',
+      entidade_id: id,
+      decisao: 'atualizado',
+      data: now,
+      dados_anteriores: {
+        codigo_cupom: previous.codigo_cupom,
+        valor: previous.valor,
+        ativo: previous.ativo,
+      },
+      dados_novos: couponData,
+    } satisfies AuditLogRecord);
+
+    return {
+      id,
+      ...couponData,
+      total_resgates: Array.isArray(previous.resgates) ? previous.resgates.length : 0,
+      ...(typeof remainingUses === 'number' ? { usos_restantes: remainingUses } : {}),
+      ...(typeof previous.created_at === 'string' ? { created_at: previous.created_at } : {}),
+      updated_at: now,
+    };
+  });
+
+  res.json({
+    success: true,
+    message: `Cupom '${result.codigo_cupom}' atualizado com sucesso.`,
+    coupon: result,
+  });
+}));
+
+adminRouter.delete('/coupons/:id', asyncRoute(async (req, res) => {
+  const id = req.params.id;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+    res.status(400).json({ error: 'Identificador de cupom inválido.' });
+    return;
+  }
+
+  const admin = adminFor(req);
+  const couponRef = db.collection('cupons').doc(id);
+  const auditRef = db.collection('admin_audit_logs').doc();
+  const now = new Date().toISOString();
+  const removedCode = await db.runTransaction(async (transaction) => {
+    const couponSnapshot = await transaction.get(couponRef);
+    if (!couponSnapshot.exists) throw new HttpError(404, `Cupom '${id}' não encontrado.`);
+    const previous = couponSnapshot.data() || {};
+    const codigo = typeof previous.codigo_cupom === 'string' ? previous.codigo_cupom : id;
+
+    transaction.delete(couponRef);
+    transaction.set(auditRef, {
+      id: auditRef.id,
+      admin_uid: admin.uid,
+      admin_email: admin.email,
+      acao: 'EXCLUIR_CUPOM',
+      entidade: 'cupons',
+      entidade_id: id,
+      decisao: 'excluido',
+      data: now,
+      dados_anteriores: {
+        codigo_cupom: codigo,
+        valor: previous.valor,
+        ativo: previous.ativo,
+        total_resgates: Array.isArray(previous.resgates) ? previous.resgates.length : 0,
+      },
+    } satisfies AuditLogRecord);
+    return codigo;
+  });
+
+  res.json({ success: true, message: `Cupom '${removedCode}' excluído. O histórico dos utilizadores foi preservado.` });
 }));
 
 adminRouter.post('/products', asyncRoute(async (req, res) => {

@@ -3,6 +3,7 @@ import {
   RechargeItem,
   WithdrawalItem,
   ProductItem,
+  CouponItem,
   PaymentMethodItem,
   UserItem,
   AuditLog,
@@ -199,6 +200,48 @@ class AdminApiClient {
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data.error || 'Erro ao alterar disponibilidade do produto.');
+    }
+    return data;
+  }
+
+  async getCoupons(): Promise<{ items: CouponItem[] }> {
+    const res = await fetch('/api/admin/coupons', {
+      headers: await this.getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Erro ao carregar cupons.');
+    }
+    return await res.json();
+  }
+
+  async saveCoupon(
+    coupon: Pick<CouponItem, 'codigo_cupom' | 'valor' | 'ativo'>,
+    id?: string,
+  ): Promise<{ success: boolean; message: string; coupon: CouponItem }> {
+    const res = await fetch(
+      id ? `/api/admin/coupons/${encodeURIComponent(id)}` : '/api/admin/coupons',
+      {
+        method: id ? 'PATCH' : 'POST',
+        headers: await this.getHeaders(),
+        body: JSON.stringify(coupon),
+      },
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Erro ao salvar cupom.');
+    }
+    return data;
+  }
+
+  async deleteCoupon(id: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`/api/admin/coupons/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: await this.getHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Erro ao excluir cupom.');
     }
     return data;
   }

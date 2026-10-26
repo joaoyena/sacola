@@ -22,7 +22,7 @@ bun install
 bun run dev
 ```
 
-Abra `http://localhost:3000`. A API lê e grava as coleções `users`, `paymentbot`, `retiradas`, `produtos`, `pasta`, `extrato_mcpn` e `admin_audit_logs` no Firestore configurado. Aprovações financeiras e respetiva auditoria são gravadas numa transação Firestore.
+Abra `http://localhost:3000`. A API lê e grava as coleções `users`, `paymentbot`, `retiradas`, `produtos`, `cupons`, `pasta`, `extrato_mcpn` e `admin_audit_logs` no Firestore configurado. No painel, a secção **Cupons** permite gerar códigos, definir o valor, ativar/desativar, editar e excluir cupons; a criação prepara os campos de resgate usados pela aplicação e as alterações administrativas são auditadas. Aprovações financeiras e respetiva auditoria são gravadas numa transação Firestore.
 
 Para validar a compilação frontend:
 

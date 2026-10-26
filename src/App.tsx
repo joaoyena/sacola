@@ -14,6 +14,7 @@ import { AdminPaymentMethods } from './pages/admin/AdminPaymentMethods';
 import { AdminProducts } from './pages/admin/AdminProducts';
 import { AdminUsers } from './pages/admin/AdminUsers';
 import { AdminAudit } from './pages/admin/AdminAudit';
+import { AdminCoupons } from './pages/admin/AdminCoupons';
 import { Loader2 } from 'lucide-react';
 
 const routePaths: Record<string, string> = {
@@ -22,6 +23,7 @@ const routePaths: Record<string, string> = {
   withdrawals: '/admin/withdrawals',
   'payment-methods': '/admin/payment-methods',
   products: '/admin/products',
+  coupons: '/admin/coupons',
   users: '/admin/users',
   audit: '/admin/audit',
 };
@@ -107,6 +109,7 @@ function AdminContent() {
       {currentTab === 'withdrawals' && <AdminWithdrawals initialFilter={activeFilter} />}
       {currentTab === 'payment-methods' && <AdminPaymentMethods />}
       {currentTab === 'products' && <AdminProducts />}
+      {currentTab === 'coupons' && <AdminCoupons />}
       {currentTab === 'users' && <AdminUsers />}
       {currentTab === 'audit' && <AdminAudit />}
     </AdminLayout>

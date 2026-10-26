@@ -12,6 +12,7 @@ import {
   X,
   Bell,
   Cpu,
+  Ticket,
 } from 'lucide-react';
 import { useAdminAuth } from '../../context/AdminAuthContext';
 
@@ -31,6 +32,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ currentTab, onSelectTa
     { id: 'withdrawals', label: 'Saques (Retiradas)', icon: ArrowUpRight },
     { id: 'payment-methods', label: 'Coordenadas (Pasta)', icon: CreditCard },
     { id: 'products', label: 'Produtos (Bots)', icon: Bot },
+    { id: 'coupons', label: 'Cupons', icon: Ticket },
     { id: 'users', label: 'Utilizadores', icon: Users },
     { id: 'audit', label: 'Auditoria de Ações', icon: ShieldCheck },
   ];

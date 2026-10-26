@@ -126,6 +126,7 @@ export const AdminAudit: React.FC = () => {
               <option value="produtos">Produtos (produtos)</option>
               <option value="pasta">Coordenadas (pasta)</option>
               <option value="users">Utilizadores (users)</option>
+              <option value="cupons">Cupons (cupons)</option>
             </select>
           </div>
 
@@ -143,6 +144,9 @@ export const AdminAudit: React.FC = () => {
               <option value="REJEITAR_SAQUE">Rejeição e Estorno de Saque</option>
               <option value="CRIAR_PRODUTO">Criação de Produto</option>
               <option value="ATUALIZAR_PRODUTO">Atualização de Produto</option>
+              <option value="CRIAR_CUPOM">Criação de Cupom</option>
+              <option value="ATUALIZAR_CUPOM">Atualização de Cupom</option>
+              <option value="EXCLUIR_CUPOM">Exclusão de Cupom</option>
               <option value="EDITAR_METODO_PAGAMENTO">Edição de Coordenada Bancária</option>
               <option value="CONGELAR_CONTA">Congelamento de Conta</option>
               <option value="DESCONGELAR_CONTA">Descongelamento de Conta</option>

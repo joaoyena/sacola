@@ -33,7 +33,7 @@ export interface AuditLog {
   admin_uid: string;
   admin_email: string;
   acao: string;
-  entidade: 'paymentbot' | 'retiradas' | 'produtos' | 'pasta' | 'users';
+  entidade: 'paymentbot' | 'retiradas' | 'produtos' | 'pasta' | 'users' | 'cupons';
   entidade_id: string;
   data: string;
   decisao: string;
@@ -112,6 +112,17 @@ export interface ProductItem {
   descricao?: string;
   criado_em?: string;
   atualizado_em?: string;
+}
+
+export interface CouponItem {
+  id: string;
+  codigo_cupom: string;
+  valor: number;
+  ativo: boolean;
+  total_resgates: number;
+  usos_restantes?: number;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface PaymentMethodItem {
