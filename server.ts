@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'path';
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
 import { DecodedIdToken, getAuth } from 'firebase-admin/auth';
@@ -1554,13 +1555,14 @@ if (!isProduction) {
   const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
   app.use(vite.middlewares);
 } else {
-  app.use(express.static('dist'));
+  const distDir = path.resolve(process.cwd(), 'dist');
+  app.use(express.static(distDir));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/') || !req.accepts('html')) {
       next();
       return;
     }
-    res.sendFile('index.html', { root: 'dist' }, (error) => {
+    res.sendFile(path.join(distDir, 'index.html'), (error) => {
       if (error) next(error);
     });
   });
