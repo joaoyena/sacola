@@ -62,32 +62,60 @@ if (!projectId) {
   throw new Error('Defina FIREBASE_PROJECT_ID ou VITE_FIREBASE_PROJECT_ID no ficheiro .env.');
 }
 
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
+
+function findServiceAccount(): Record<string, unknown> | null {
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (serviceAccountJson && serviceAccountJson.trim()) {
+    try {
+      return JSON.parse(serviceAccountJson);
+    } catch {
+      try {
+        const decoded = Buffer.from(serviceAccountJson, 'base64').toString('utf-8');
+        return JSON.parse(decoded);
+      } catch {
+        console.warn('Aviso: FIREBASE_SERVICE_ACCOUNT_JSON presente, mas formato JSON ou Base64 inválido.');
+      }
+    }
+  }
+
+  const possibleDirs = [
+    rootDir,
+    process.cwd(),
+    '/etc/secrets',
+    path.resolve(process.cwd(), '..'),
+    path.resolve(rootDir, '..'),
+  ];
+
+  for (const dir of possibleDirs) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      const files = fs.readdirSync(dir);
+      const match = files.find((f) =>
+        (f.includes('firebase-adminsdk') || f.startsWith('service-account')) && f.endsWith('.json')
+      );
+      if (match) {
+        const fullPath = path.resolve(dir, match);
+        const content = fs.readFileSync(fullPath, 'utf-8');
+        const parsed = JSON.parse(content);
+        console.log(`Credenciais Firebase Admin carregadas com sucesso de: ${fullPath}`);
+        return parsed;
+      }
+    } catch {
+      // Tenta o próximo diretório
+    }
+  }
+
+  return null;
+}
+
 function createFirebaseApp() {
   const existingApp = getApps()[0];
   if (existingApp) return existingApp;
 
-  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (serviceAccountJson) {
-    let serviceAccount: Record<string, unknown>;
-    try {
-      serviceAccount = JSON.parse(serviceAccountJson);
-    } catch {
-      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON não contém JSON válido.');
-    }
+  const serviceAccount = findServiceAccount();
+  if (serviceAccount) {
     return initializeApp({ credential: cert(serviceAccount), projectId });
-  }
-
-  try {
-    const localKeyFiles = fs.readdirSync(process.cwd()).filter((f) =>
-      (f.includes('firebase-adminsdk') || f.startsWith('service-account')) && f.endsWith('.json')
-    );
-    if (localKeyFiles.length > 0) {
-      const fileContent = fs.readFileSync(path.resolve(process.cwd(), localKeyFiles[0]), 'utf-8');
-      const serviceAccount = JSON.parse(fileContent);
-      return initializeApp({ credential: cert(serviceAccount), projectId });
-    }
-  } catch (err) {
-    console.warn('Aviso ao procurar credencial local do Firebase Admin:', err);
   }
 
   return initializeApp({ credential: applicationDefault(), projectId });
@@ -1565,7 +1593,6 @@ adminRouter.get('/audit-logs', asyncRoute(async (req, res) => {
 
 app.use('/api/admin', adminRouter);
 
-const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(rootDir, 'dist');
 const indexHtmlPath = path.join(distDir, 'index.html');
 
